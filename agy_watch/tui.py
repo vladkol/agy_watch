@@ -315,10 +315,15 @@ class AgyWatchApp(App):
         Binding("3", "filter_subagent_3", "Subagent 3", show=False),
     ]
 
-    def __init__(self, initial_session_id: Optional[str] = None, registry_db: Optional[str] = None):
+    def __init__(
+        self,
+        initial_session_id: Optional[str] = None,
+        registry_db: Optional[str] = None,
+        settings: Optional[UserSettings] = None,
+    ):
         super().__init__()
         self.registry: GlobalRegistry = get_global_registry()
-        self.settings: UserSettings = get_user_settings()
+        self.settings: UserSettings = settings or get_user_settings()
         self.initial_session_id = initial_session_id
         self.current_watcher: Optional[SessionWatcher] = None
         self.selected_event: Optional[Dict[str, Any]] = None

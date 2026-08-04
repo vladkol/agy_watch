@@ -238,7 +238,8 @@ async def test_tui_app_mount_and_pilot_lifecycle():
         from agy_watch.tui import AgyWatchApp
         reg_module._default_registry = registry
 
-        app = AgyWatchApp(initial_session_id="tui_traj_001")
+        from agy_watch.settings import UserSettings
+        app = AgyWatchApp(initial_session_id="tui_traj_001", settings=UserSettings())
 
         async with app.run_test() as pilot:
             # 1. Verify CSS stylesheet parsed without error and app is active
