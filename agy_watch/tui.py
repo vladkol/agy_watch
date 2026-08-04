@@ -41,7 +41,7 @@ from textual.binding import Binding
 
 from agy_watch.registry import get_global_registry, GlobalRegistry
 from agy_watch.watcher import SessionWatcher
-from agy_watch.settings import get_user_settings, UserSettings, AVAILABLE_SYNTAX_THEMES
+from agy_watch.settings import get_user_settings, UserSettings, SUPPORTED_THEMES, AVAILABLE_SYNTAX_THEMES
 
 
 def open_media_file_cross_platform(file_path: str) -> bool:
@@ -60,40 +60,31 @@ def open_media_file_cross_platform(file_path: str) -> bool:
         return False
 
 
-def get_syntax_lexer_for_path(path: str) -> str:
-    """Infers the syntax highlighting lexer based on file extension."""
-    ext = os.path.splitext(path)[1].lower()
+def get_syntax_lexer_for_path(file_path: str) -> str:
+    """Detects lexer name from file extension for rich.syntax.Syntax."""
+    ext = os.path.splitext(file_path)[1].lower()
     mapping = {
         ".py": "python",
         ".js": "javascript",
-        ".jsx": "jsx",
         ".ts": "typescript",
         ".tsx": "tsx",
-        ".html": "html",
-        ".htm": "html",
-        ".css": "css",
-        ".scss": "scss",
+        ".jsx": "jsx",
         ".json": "json",
         ".yaml": "yaml",
         ".yml": "yaml",
         ".toml": "toml",
+        ".html": "html",
+        ".css": "css",
         ".sh": "bash",
-        ".bash": "bash",
         ".zsh": "bash",
+        ".bash": "bash",
+        ".md": "markdown",
         ".sql": "sql",
         ".go": "go",
         ".rs": "rust",
-        ".c": "c",
         ".cpp": "cpp",
-        ".h": "c",
+        ".c": "c",
         ".java": "java",
-        ".kt": "kotlin",
-        ".xml": "xml",
-        ".dockerfile": "docker",
-        ".md": "markdown",
-        ".markdown": "markdown",
-        ".txt": "text",
-        ".log": "text",
     }
     return mapping.get(ext, "text")
 
@@ -127,41 +118,46 @@ class FullscreenReaderModal(ModalScreen):
         with Vertical(id="modal-container"):
             yield Static(f" [bold white]═══ {self.reader_title} ═══[/bold white] (Press ESC or Q to close, W to toggle wrap)", id="modal-header")
             with VerticalScroll(id="modal-scroll"):
-                yield Static(self._build_rendered_content(), id="modal-content")
+                yield Static(id="modal-body")
 
-    def _build_rendered_content(self) -> Any:
-        if self.file_path and os.path.exists(self.file_path):
-            ext = os.path.splitext(self.file_path)[1].lower()
-            if ext in (".md", ".markdown"):
-                try:
-                    with open(self.file_path, "r", encoding="utf-8", errors="replace") as f:
-                        return Markdown(f.read())
-                except Exception as e:
-                    return Text(f"Error reading file: {e}", style="red")
-            else:
-                lexer = get_syntax_lexer_for_path(self.file_path)
-                try:
-                    return Syntax.from_path(
-                        self.file_path,
-                        lexer=lexer,
-                        line_numbers=True,
-                        theme=self.syntax_theme,
-                        word_wrap=self.wrap_mode,
-                    )
-                except Exception as e:
-                    return Text(f"Syntax render error: {e}", style="red")
-
-        if self.is_markdown and self.raw_content:
-            return Markdown(self.raw_content)
-        elif self.raw_content:
-            return Text(self.raw_content, style="bright_white")
-        return Text("No content available.", style="dim")
+    def on_mount(self) -> None:
+        self._render_content()
 
     def action_toggle_wrap(self) -> None:
         self.wrap_mode = not self.wrap_mode
-        modal_content = self.query_one("#modal-content", Static)
-        modal_content.update(self._build_rendered_content())
-        self.notify(f"Word wrap: {'Enabled' if self.wrap_mode else 'Disabled'}")
+        self._render_content()
+
+    def _render_content(self) -> None:
+        body = self.query_one("#modal-body", Static)
+        if self.file_path and os.path.exists(self.file_path):
+            try:
+                with open(self.file_path, "r", encoding="utf-8", errors="replace") as f:
+                    text_content = f.read()
+
+                if self.is_markdown:
+                    body.update(Markdown(text_content))
+                else:
+                    lexer = get_syntax_lexer_for_path(self.file_path)
+                    body.update(Syntax(
+                        text_content,
+                        lexer,
+                        theme=self.syntax_theme,
+                        line_numbers=True,
+                        word_wrap=self.wrap_mode,
+                    ))
+            except Exception as e:
+                body.update(f"Error reading file: {e}")
+        elif self.raw_content is not None:
+            if self.is_markdown:
+                body.update(Markdown(self.raw_content))
+            else:
+                body.update(Syntax(
+                    self.raw_content,
+                    "text",
+                    theme=self.syntax_theme,
+                    line_numbers=False,
+                    word_wrap=self.wrap_mode,
+                ))
 
 
 class AgyWatchApp(App):
@@ -172,8 +168,8 @@ class AgyWatchApp(App):
 
     CSS = """
     Screen {
-        background: #121317;
-        color: #e1e4ea;
+        background: $background;
+        color: $text;
     }
 
     #main-layout {
@@ -185,15 +181,16 @@ class AgyWatchApp(App):
         width: 26%;
         min-width: 28;
         max-width: 38;
-        border-right: solid #2a2d37;
-        background: #181920;
+        border-right: solid $border;
+        background: $surface;
         padding: 0 1;
     }
 
     #center-pane {
         width: 38%;
         min-width: 40;
-        border-right: solid #2a2d37;
+        border-right: solid $border;
+        background: $background;
         padding: 0 1;
     }
 
@@ -201,12 +198,12 @@ class AgyWatchApp(App):
         width: 36%;
         min-width: 42;
         padding: 0 1;
-        background: #14151b;
+        background: $surface;
     }
 
     .pane-title {
-        background: #20222c;
-        color: #8be9fd;
+        background: $panel;
+        color: $primary;
         text-align: center;
         padding: 0 1;
         text-style: bold;
@@ -220,11 +217,11 @@ class AgyWatchApp(App):
 
     .session-item {
         padding: 1 1;
-        border-bottom: solid #222530;
+        border-bottom: solid $border-blurred;
     }
 
     .session-item:hover {
-        background: #252836;
+        background: $boost;
     }
 
     #tree-container {
@@ -245,7 +242,7 @@ class AgyWatchApp(App):
 
     #artifacts-list-container {
         height: 40%;
-        border-bottom: solid #2a2d37;
+        border-bottom: solid $border;
     }
 
     #artifacts-list {
@@ -258,8 +255,8 @@ class AgyWatchApp(App):
     }
 
     #artifacts-preview-header {
-        background: #202330;
-        color: #50fa7b;
+        background: $panel;
+        color: $secondary;
         padding: 0 1;
         text-style: bold;
         height: 1;
@@ -267,29 +264,29 @@ class AgyWatchApp(App):
 
     #artifacts-preview-scroll {
         height: 1fr;
-        background: #121319;
+        background: $background;
         padding: 0 1;
     }
 
     .artifact-item {
         padding: 1 1;
-        border-bottom: solid #242735;
+        border-bottom: solid $border-blurred;
     }
 
     .artifact-item:hover {
-        background: #282b3d;
+        background: $boost;
     }
 
     #modal-container {
         width: 90%;
         height: 90%;
-        background: #181a24;
-        border: thick #bd93f9;
+        background: $surface;
+        border: thick $accent;
         padding: 1 2;
     }
 
     #modal-header {
-        background: #282a36;
+        background: $panel;
         padding: 0 1;
         margin-bottom: 1;
     }
@@ -468,6 +465,17 @@ class AgyWatchApp(App):
         tree.root.set_label(f"Root Agent ({session_id[:8]}) - {session['title'][:32]}")
         mode_str = "Tree" if self.tree_mode else "Flat"
         self.query_one("#timeline-title", Static).update(f" EXECUTION ({mode_str}): {session_id[:8]} ({session['status']}) ")
+
+        # Switch right pane to Event Details tab
+        try:
+            tabs = self.query_one("#inspector-tabs", TabbedContent)
+            if tabs.active != "tab-details":
+                tabs.active = "tab-details"
+                self.settings.active_tab = "tab-details"
+                self.settings.save()
+        except Exception:
+            pass
+
         self.poll_live_updates()
 
     def poll_live_updates(self) -> None:
@@ -740,6 +748,29 @@ class AgyWatchApp(App):
 
         inspector.update(t)
 
+        # Dynamically show/hide Artifacts & Files tab based on event artifacts
+        try:
+            tab_artifacts = self.query_one("#tab-artifacts", TabPane)
+            event_artifacts = ev.get("artifacts") or []
+            has_artifacts = bool(event_artifacts)
+            tab_artifacts.display = has_artifacts
+
+            if has_artifacts:
+                art_list = self.query_one("#artifacts-list", ListView)
+                art_list.clear()
+                for art in event_artifacts:
+                    self._add_artifact_to_list(art)
+                if event_artifacts:
+                    first_art = event_artifacts[0]["path"]
+                    self.selected_artifact_path = first_art
+                    self._render_artifact_preview(first_art)
+            else:
+                tabs = self.query_one("#inspector-tabs", TabbedContent)
+                if tabs.active == "tab-artifacts":
+                    tabs.active = "tab-details"
+        except Exception:
+            pass
+
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handles list view selections from Sessions or Artifacts lists."""
         if event.list_view.id == "sessions-list":
@@ -759,14 +790,38 @@ class AgyWatchApp(App):
                         title=f"File: {os.path.basename(file_path)}",
                         file_path=file_path,
                         is_markdown=(ext in (".md", ".markdown")),
+                        syntax_theme=self.settings.syntax_theme,
+                        wrap_mode=self.settings.wrap_text,
                     ))
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
-        """Handles tree node selection to inspect step payload."""
+        """Handles tree node selection to inspect step payload and switch to Event Details tab."""
         if event.node.data:
             self.selected_event = event.node.data
             self.is_following = False
             self._render_inspector_event(event.node.data)
+            try:
+                tabs = self.query_one("#inspector-tabs", TabbedContent)
+                if tabs.active != "tab-details":
+                    tabs.active = "tab-details"
+                    self.settings.active_tab = "tab-details"
+                    self.settings.save()
+            except Exception:
+                pass
+
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        """Updates inspector and switches to Event Details tab as cursor navigates tree nodes."""
+        if event.node.data:
+            self.selected_event = event.node.data
+            self._render_inspector_event(event.node.data)
+            try:
+                tabs = self.query_one("#inspector-tabs", TabbedContent)
+                if tabs.active != "tab-details":
+                    tabs.active = "tab-details"
+                    self.settings.active_tab = "tab-details"
+                    self.settings.save()
+            except Exception:
+                pass
 
     def action_toggle_follow(self) -> None:
         self.is_following = not self.is_following
@@ -792,31 +847,56 @@ class AgyWatchApp(App):
             self.poll_live_updates()
 
     def action_toggle_inspector_tab(self) -> None:
-        """Toggles active inspector tab between Event Details and Artifacts & Files."""
-        tabs = self.query_one("#inspector-tabs", TabbedContent)
-        if tabs.active == "tab-details":
-            tabs.active = "tab-artifacts"
-            self.settings.active_tab = "tab-artifacts"
-            self.notify("Switched to Artifacts & Files tab.")
-        else:
-            tabs.active = "tab-details"
-            self.settings.active_tab = "tab-details"
-            self.notify("Switched to Event Details tab.")
-        self.settings.save()
+        """Toggles active inspector tab between Event Details and Artifacts & Files if available."""
+        try:
+            tab_artifacts = self.query_one("#tab-artifacts", TabPane)
+            if not tab_artifacts.display:
+                self.notify("This event has no artifacts or files.", severity="information")
+                return
+
+            tabs = self.query_one("#inspector-tabs", TabbedContent)
+            if tabs.active == "tab-details":
+                tabs.active = "tab-artifacts"
+                self.settings.active_tab = "tab-artifacts"
+                self.notify("Switched to Artifacts & Files tab.")
+            else:
+                tabs.active = "tab-details"
+                self.settings.active_tab = "tab-details"
+                self.notify("Switched to Event Details tab.")
+            self.settings.save()
+        except Exception:
+            pass
 
     def action_cycle_syntax_theme(self) -> None:
-        """Cycles through available syntax themes and saves to user settings."""
-        current = self.settings.syntax_theme
-        try:
-            next_idx = (AVAILABLE_SYNTAX_THEMES.index(current) + 1) % len(AVAILABLE_SYNTAX_THEMES)
-        except ValueError:
-            next_idx = 0
-        self.settings.syntax_theme = AVAILABLE_SYNTAX_THEMES[next_idx]
-        self.settings.save()
-        self.notify(f"Syntax Theme: {self.settings.syntax_theme}")
+        """Cycles through available app themes + syntax themes and saves to user settings."""
+        current_theme = getattr(self, "theme", None) or self.settings.theme
+        matching_idx = 0
+        for i, t in enumerate(SUPPORTED_THEMES):
+            if t["app_theme"] == current_theme or t["name"] == current_theme:
+                matching_idx = i
+                break
 
+        next_idx = (matching_idx + 1) % len(SUPPORTED_THEMES)
+        theme_entry = SUPPORTED_THEMES[next_idx]
+
+        # Apply to Textual App
+        try:
+            self.theme = theme_entry["app_theme"]
+        except Exception:
+            pass
+
+        # Save to settings
+        self.settings.theme = theme_entry["app_theme"]
+        self.settings.syntax_theme = theme_entry["syntax_theme"]
+        self.settings.save()
+
+        self.notify(f"Theme: {theme_entry['name']} (Syntax: {theme_entry['syntax_theme']})")
+
+        # Refresh preview and inspector with new syntax theme
         if self.selected_artifact_path:
             self._render_artifact_preview(self.selected_artifact_path)
+        if self.selected_event:
+            self._render_inspector_event(self.selected_event)
 
     def action_open_selected_media_external(self) -> None:
         """Opens the selected artifact or media file in the OS external viewer."""

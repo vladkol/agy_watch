@@ -39,6 +39,7 @@ from agy_watch.tui import (
 from agy_watch.settings import (
     UserSettings,
     get_user_settings,
+    SUPPORTED_THEMES,
     AVAILABLE_SYNTAX_THEMES,
 )
 
@@ -60,5 +61,6 @@ __all__ = [
     "AgyWatchApp",
     "UserSettings",
     "get_user_settings",
+    "SUPPORTED_THEMES",
     "AVAILABLE_SYNTAX_THEMES",
 ]

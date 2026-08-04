@@ -212,12 +212,30 @@ async def test_tui_app_mount_and_pilot_lifecycle():
         db = WireTapDB(db_path=sess_db, blob_store=store)
 
         db.record_outbound({"userInput": "TUI Pilot Verification Prompt"})
+        brain_dir = os.path.join(temp_dir, "tui_task", "brain", "tui_cas_001")
+        os.makedirs(brain_dir, exist_ok=True)
+        img_file = os.path.join(brain_dir, "mock_tui_chart.png")
+        with open(img_file, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 256)
+
+        db.record_outbound({"userInput": "TUI Pilot Verification Prompt"})
         db.record_inbound({
             "initializeConversationResponse": {"cascadeId": "tui_cas_001"},
             "stepUpdate": {
                 "trajectoryId": "tui_traj_001",
                 "stepIndex": 1,
                 "text": "TUI Response Content",
+                "state": "STATE_ACTIVE",
+            },
+        })
+        db.record_inbound({
+            "stepUpdate": {
+                "trajectoryId": "tui_traj_001",
+                "stepIndex": 2,
+                "generateImage": {
+                    "imageName": "mock_tui_chart",
+                    "prompt": "Test Chart",
+                },
                 "state": "STATE_DONE",
             },
         })
@@ -266,7 +284,7 @@ async def test_tui_app_mount_and_pilot_lifecycle():
             await pilot.press("space")  # Resume follow
             assert app.is_following is True
 
-            # 4. Test tab switching (a key)
+            # 4. Test tab switching (a key) on step with artifacts
             tabs = app.query_one("#inspector-tabs")
             assert tabs.active == "tab-details"
             await pilot.press("a")      # Switch to Artifacts tab
@@ -354,7 +372,7 @@ def test_user_settings_persistence_and_restoration():
 
         # 1. Default settings
         s1 = UserSettings.load(settings_file)
-        assert s1.theme == "textual-dark"
+        assert s1.theme == "dracula"
         assert s1.syntax_theme == "dracula"
         assert s1.last_session_id is None
         assert s1.view_mode == "tree"
@@ -421,10 +439,21 @@ async def test_tui_app_settings_restoration():
         async with app.run_test() as pilot:
             await pilot.pause(0.2)
 
-            # Check restored view mode and tab
+            # Check restored view mode
             assert app.tree_mode is False
+
+            # Session attachment sets tab to tab-details as required
             tabs = app.query_one("#inspector-tabs", TabbedContent)
-            assert tabs.active == "tab-artifacts"
+            assert tabs.active == "tab-details"
+
+            # Artifacts tab is hidden when no artifacts exist for the selected event
+            from textual.widgets import TabPane
+            tab_artifacts = app.query_one("#tab-artifacts", TabPane)
+            assert tab_artifacts.display is False
+
+            # Pressing 'a' keeps tab-details when tab-artifacts is hidden
+            await pilot.press("a")
+            assert tabs.active == "tab-details"
 
             # Check cycle syntax theme action
             app.action_cycle_syntax_theme()

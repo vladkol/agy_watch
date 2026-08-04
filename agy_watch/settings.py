@@ -24,23 +24,26 @@ logger = logging.getLogger("agy_watch.settings")
 
 DEFAULT_SETTINGS_PATH = os.path.expanduser("~/.antigravity/samples/agy_watch/settings.json")
 
-# Popular themes supported by Rich Syntax & Textual
-AVAILABLE_SYNTAX_THEMES: List[str] = [
-    "dracula",
-    "monokai",
-    "github-dark",
-    "nord",
-    "solarized-dark",
-    "one-dark",
-    "material",
+# Paired themes supported by both Textual App engine and Rich Syntax highlighter
+SUPPORTED_THEMES: List[Dict[str, str]] = [
+    {"name": "dracula", "app_theme": "dracula", "syntax_theme": "dracula"},
+    {"name": "nord", "app_theme": "nord", "syntax_theme": "nord"},
+    {"name": "monokai", "app_theme": "monokai", "syntax_theme": "monokai"},
+    {"name": "tokyo-night", "app_theme": "tokyo-night", "syntax_theme": "nord"},
+    {"name": "gruvbox", "app_theme": "gruvbox", "syntax_theme": "monokai"},
+    {"name": "catppuccin-mocha", "app_theme": "catppuccin-mocha", "syntax_theme": "one-dark"},
+    {"name": "solarized-dark", "app_theme": "solarized-dark", "syntax_theme": "solarized-dark"},
+    {"name": "textual-dark", "app_theme": "textual-dark", "syntax_theme": "dracula"},
 ]
+
+AVAILABLE_SYNTAX_THEMES: List[str] = [t["syntax_theme"] for t in SUPPORTED_THEMES]
 
 
 @dataclass
 class UserSettings:
     """Persistent user preferences and state for agy_watch TUI and CLI."""
 
-    theme: str = "textual-dark"
+    theme: str = "dracula"
     syntax_theme: str = "dracula"
     last_session_id: Optional[str] = None
     view_mode: str = "tree"  # "tree" or "flat"
