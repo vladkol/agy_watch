@@ -46,7 +46,7 @@ def format_output(data: Any, fmt: str = "text") -> str:
 @click.version_option(version="0.1.0", prog_name="agy_watch")
 @click.pass_context
 def main(ctx: click.Context, attach_id: Optional[str], registry_db: Optional[str]) -> None:
-    """agy_watch: Real-Time Multi-Agent Observability Console and Wire-Tap SDK."""
+    """agy_watch: Antigravity SDK Observability Console."""
     if ctx.invoked_subcommand is None:
         # Default action: Launch interactive 3-pane Textual TUI
         app = AgyWatchApp(initial_session_id=attach_id, registry_db=registry_db)

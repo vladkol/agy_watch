@@ -168,7 +168,7 @@ class AgyWatchApp(App):
     """The main Textual Application for Antigravity Agent Observability."""
 
     TITLE = "Antigravity Watch (agy_watch)"
-    SUB_TITLE = "Real-Time Multi-Agent Observability Console"
+    SUB_TITLE = "Antigravity SDK Observability Console"
 
     CSS = """
     Screen {
