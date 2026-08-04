@@ -8,9 +8,9 @@
 
 ## Welcome to agy_watch!
 
-The [Google Antigravity Python SDK](https://github.com/google/antigravity) makes it remarkably fast and intuitive to build autonomous AI agents, multi-agent swarms, and tool-augmented workflows. Under the hood, Antigravity pairs an ergonomic Python interface with a high-performance Go runtime (`localharness`) that executes model reasoning, tool invocations, and subagent lifecycles at blistering speed.
+The [Google Antigravity Python SDK](https://github.com/google/antigravity) makes it fast and intuitive to build autonomous AI agents, multi-agent swarms, and tool-augmented workflows. Antigravity SDK exposes a Python interface paired under the hood with a high-performance Go runtime (`localharness`) that executes model reasoning, tool invocations, and subagent lifecycles at blistering speed.
 
-**`agy_watch` gives you front-row seats to your agents' inner worlds.**
+**`agy_watch` gives you front-row seats to your Antigravity agents' inner worlds.**
 
 Whether you're debugging multi-agent coordination, inspecting subagent prompts, or viewing generated artifacts live, `agy_watch` lets you watch the action unfold in real time right from your terminal.
 
