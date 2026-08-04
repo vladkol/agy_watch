@@ -1,7 +1,10 @@
 # agy_watch: System Architecture & Internals
 
 > [!IMPORTANT]
-> **Disclaimer**: `agy_watch` is an independent, community developer debugging and observability tool and is **NOT an official Google product or framework**. It is designed for testing, inspecting, and profiling autonomous agents, verified against [`google-antigravity==0.1.9`](https://pypi.org/project/google-antigravity/) and its bundled `localharness` binary.
+> **Disclaimer**: `agy_watch` is a personal developer debugging and observability tool and is **NOT an official Google product or framework**. It is designed for testing, inspecting, and profiling autonomous agents, built with [`google-antigravity==0.1.9`](https://pypi.org/project/google-antigravity/) and its bundled `localharness` binary.
+The tool is built by Antigravity itself by observing Antigravity SDK and localharness protocol.
+There is no guaranty for this tool to work prior or beyond this version.
+If any changes are required, you are welcome to file an issue and/or make a Pull Request.
 
 ---
 
