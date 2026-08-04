@@ -6,14 +6,6 @@
 [![Built with Textual](https://img.shields.io/badge/TUI-Textual-green.svg)](https://textual.textualize.io/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-> [!IMPORTANT]
-> **Disclaimer**: `agy_watch` is a personal developer debugging and observability tool and is **NOT an official Google product or framework**. It is designed for testing, inspecting, and profiling autonomous agents, built with [`google-antigravity==0.1.9`](https://pypi.org/project/google-antigravity/) and its bundled `localharness` binary.
-The tool is built by Antigravity itself by observing Antigravity SDK and localharness protocol.
-There is no guaranty for this tool to work prior or beyond this version.
-If any changes are required, you are welcome to file an issue and/or make a Pull Request.
-
----
-
 ## Welcome to agy_watch!
 
 The [Google Antigravity Python SDK](https://github.com/google/antigravity) makes it remarkably fast and intuitive to build autonomous AI agents, multi-agent swarms, and tool-augmented workflows. Under the hood, Antigravity pairs an ergonomic Python interface with a high-performance Go runtime (`localharness`) that executes model reasoning, tool invocations, and subagent lifecycles at blistering speed.
@@ -196,6 +188,14 @@ Explore the runnable examples in the [`examples/`](examples/) directory:
 * **[examples/getting_started/hello_world_wiretap.py](examples/getting_started/hello_world_wiretap.py)**: Minimal Antigravity SDK agent with wire-tapping enabled.
 * **[examples/image_generation/generate_image_agent.py](examples/image_generation/generate_image_agent.py)**: Agent generating visual image assets, immediately viewable in the TUI Artifacts tab.
 * **[examples/yolo_agent/main.py](examples/yolo_agent/main.py)**: Autonomous multi-agent runner orchestrating concurrent worker subagents.
+
+---
+
+> [!IMPORTANT]
+> **Disclaimer**: `agy_watch` is a personal developer debugging and observability tool and is **NOT an official Google product or framework**. It is designed for testing, inspecting, and profiling autonomous agents built with [`google-antigravity==0.1.9`](https://pypi.org/project/google-antigravity/) and its bundled `localharness` binary.
+The tool is built by Antigravity itself by observing Antigravity SDK and localharness protocol.
+There is no guaranty for this tool to work prior or beyond this version.
+If any changes are required, you are welcome to file an issue and/or make a Pull Request.
 
 ---
 
