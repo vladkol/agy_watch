@@ -455,12 +455,9 @@ async def test_tui_app_settings_restoration():
             tabs = app.query_one("#inspector-tabs", TabbedContent)
             assert tabs.active == "tab-details"
 
-            # Artifacts tab is hidden when no artifacts exist for the selected event
-            from textual.widgets import TabPane
-            tab_artifacts = app.query_one("#tab-artifacts", TabPane)
-            assert tab_artifacts.display is False
-
-            # Pressing 'a' keeps tab-details when tab-artifacts is hidden
+            # Pressing 'a' toggles between tab-details and tab-artifacts
+            await pilot.press("a")
+            assert tabs.active == "tab-artifacts"
             await pilot.press("a")
             assert tabs.active == "tab-details"
 

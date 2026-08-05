@@ -62,11 +62,11 @@ def open_media_file_cross_platform(file_path: str) -> bool:
         return False
 
 
-def _guess_syntax_language(file_name: str) -> str:
+def get_syntax_lexer_for_path(file_path: str) -> str:
     """Infers Textual/Rich syntax language identifier from filename extension."""
-    if not file_name:
+    if not file_path:
         return "text"
-    _, ext = os.path.splitext(file_name.lower())
+    _, ext = os.path.splitext(file_path.lower())
     mapping = {
         ".py": "python",
         ".json": "json",
@@ -89,8 +89,12 @@ def _guess_syntax_language(file_name: str) -> str:
         ".cpp": "cpp",
         ".c": "c",
         ".java": "java",
+        ".txt": "text",
     }
     return mapping.get(ext, "text")
+
+
+_guess_syntax_language = get_syntax_lexer_for_path
 
 
 def _calculate_wrapped_height(text: str, pane_width: int = 65, min_h: int = 6, max_h: int = 35) -> int:
@@ -922,28 +926,7 @@ class AgyWatchApp(App):
         else:
             tok_area.display = False
 
-        # Dynamically show/hide Artifacts & Files tab based on event artifacts
-        try:
-            tab_artifacts = self.query_one("#tab-artifacts", TabPane)
-            event_artifacts = ev.get("artifacts") or []
-            has_artifacts = bool(event_artifacts)
-            tab_artifacts.display = has_artifacts
-
-            if has_artifacts:
-                art_list = self.query_one("#artifacts-list", ListView)
-                art_list.clear()
-                for art in event_artifacts:
-                    self._add_artifact_to_list(art)
-                if event_artifacts:
-                    first_art = event_artifacts[0]["path"]
-                    self.selected_artifact_path = first_art
-                    self._render_artifact_preview(first_art)
-            else:
-                tabs = self.query_one("#inspector-tabs", TabbedContent)
-                if tabs.active == "tab-artifacts":
-                    tabs.active = "tab-details"
-        except Exception:
-            pass
+        # Event details rendering complete
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handles list view selections from Sessions or Artifacts lists."""
@@ -1021,13 +1004,8 @@ class AgyWatchApp(App):
             self.poll_live_updates()
 
     def action_toggle_inspector_tab(self) -> None:
-        """Toggles active inspector tab between Event Details and Artifacts & Files if available."""
+        """Toggles active inspector tab between Event Details and Artifacts & Files."""
         try:
-            tab_artifacts = self.query_one("#tab-artifacts", TabPane)
-            if not tab_artifacts.display:
-                self.notify("This event has no artifacts or files.", severity="information")
-                return
-
             tabs = self.query_one("#inspector-tabs", TabbedContent)
             if tabs.active == "tab-details":
                 tabs.active = "tab-artifacts"
