@@ -200,6 +200,13 @@ Timestamps and clocks dynamically resolve user locale conventions:
 * Preferences (theme, syntax palette, view mode, active tab, wrap text) persist to `~/.antigravity/samples/agy_watch/settings.json`.
 * Non-interactive commands and unit test fixtures use `AGY_WATCH_SETTINGS_PATH` and `AGY_WATCH_REGISTRY_DB` environment overrides to guarantee complete isolation without modifying user configuration.
 
+### 4.6 Control-Bounded Text Selection & Universal JSON Architecture ([`tui.py`](../agy_watch/tui.py))
+
+* **Isolated Widget Selection Buffers**: Instead of a monolithic static canvas, `agy_watch` renders inspectable text elements (prompts, model responses, reasoning) as distinct, theme-styled `SelectableTextArea(read_only=True)` widgets with wrap-aware dynamic height calculation.
+* **Universal Selectable JSON Representation**: Every event (tool calls, prompts, model responses, system events) renders a dedicated, syntax-highlighted `SelectableTextArea(language="json", read_only=True)` containing its full structured payload and parameters.
+* **Direct Fullscreen Modal Reader**: [`FullscreenReaderModal`](../agy_watch/tui.py) mounts `SelectableTextArea(read_only=True, show_line_numbers=True)` directly inside the modal viewport with auto-focus on mount, enabling smooth, reliable mouse drag selection, cursor navigation, and `Ctrl+A` / `Cmd+C` copying.
+* **Multi-Platform Keyboard Layout & Clipboard Synchronization**: Full modifier support for **`Cmd+C`**, **`Alt+C`**, **`Meta+C`**, **`Ctrl+C`**, and **`c`** across macOS (with Apple/PC keyboard mapping via `pbcopy`), Linux (Wayland `wl-copy`, X11 `xclip`/`xsel`), and Windows (`clip.exe`). Pressing copy with highlighted text copies the selection; pressing without selection copies the entire formatted event JSON.
+
 ---
 
 ## 5. Edge Cases & Resilience Matrix

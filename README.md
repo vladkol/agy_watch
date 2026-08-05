@@ -157,12 +157,12 @@ agy_watch
 | **`q`** | Quit | Exit the `agy_watch` console. |
 | **`Space`** | Follow / Pause | Toggle auto-scrolling to follow the live event stream. |
 | **`f`** or **`Enter`** | Fullscreen | Open the full-screen reader modal for the selected event, code, or markdown file. |
+| **`c`** / **`Cmd+C`** / **`Alt+C`** / **`Ctrl+C`** | Copy Text | Copy highlighted text from active control or full event payload directly to OS clipboard. |
 | **`a`** | Toggle Tab | Switch inspector pane between `Event Details` and `Artifacts & Files`. |
 | **`t`** | Tree / Flat View | Toggle between Hierarchical Subagent Tree and Flat Chronological Stream. |
-| **`s`** | Cycle Theme | Cycle through paired TUI and syntax highlighter color schemes (Dracula, Nord, Monokai, Tokyo Night, Gruvbox, Catppuccin). |
+| **`s`** / **`p`** | Cycle Theme | Cycle through paired TUI and syntax highlighter color schemes (Dracula, Nord, Monokai, Tokyo Night, Gruvbox, Catppuccin). |
 | **`o`** | Open External | Open selected media file in your OS default viewer (Preview, QuickLook, `xdg-open`). |
 | **`w`** | Toggle Wrap | Toggle word wrapping inside the full-screen reader. |
-| **`c`** | Copy Payload | Copy the active step payload JSON to your system clipboard. |
 | **`r`** | Refresh | Force immediate refresh of host sessions. |
 | **`0`** | Filter All | Reset subagent filters and display all execution lanes. |
 

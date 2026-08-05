@@ -34,7 +34,7 @@ from rich.markdown import Markdown
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll, Container
-from textual.widgets import Header, Footer, Static, ListView, ListItem, Tree, TabbedContent, TabPane, Label
+from textual.widgets import Header, Footer, Static, ListView, ListItem, Tree, TabbedContent, TabPane, Label, TextArea
 from textual.widgets.tree import TreeNode
 from textual.screen import ModalScreen
 from textual.binding import Binding
@@ -43,6 +43,7 @@ from agy_watch.registry import get_global_registry, GlobalRegistry
 from agy_watch.watcher import SessionWatcher
 from agy_watch.settings import get_user_settings, UserSettings, SUPPORTED_THEMES, AVAILABLE_SYNTAX_THEMES
 from agy_watch.tool_renderers import build_tool_tree_label, render_tool_event
+from agy_watch.clipboard import copy_to_system_clipboard
 
 
 def open_media_file_cross_platform(file_path: str) -> bool:
@@ -61,24 +62,26 @@ def open_media_file_cross_platform(file_path: str) -> bool:
         return False
 
 
-def get_syntax_lexer_for_path(file_path: str) -> str:
-    """Detects lexer name from file extension for rich.syntax.Syntax."""
-    ext = os.path.splitext(file_path)[1].lower()
+def _guess_syntax_language(file_name: str) -> str:
+    """Infers Textual/Rich syntax language identifier from filename extension."""
+    if not file_name:
+        return "text"
+    _, ext = os.path.splitext(file_name.lower())
     mapping = {
         ".py": "python",
+        ".json": "json",
         ".js": "javascript",
         ".ts": "typescript",
-        ".tsx": "tsx",
-        ".jsx": "jsx",
-        ".json": "json",
-        ".yaml": "yaml",
-        ".yml": "yaml",
-        ".toml": "toml",
         ".html": "html",
         ".css": "css",
         ".sh": "bash",
         ".zsh": "bash",
         ".bash": "bash",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".toml": "toml",
+        ".tsx": "tsx",
+        ".jsx": "jsx",
         ".md": "markdown",
         ".sql": "sql",
         ".go": "go",
@@ -90,12 +93,40 @@ def get_syntax_lexer_for_path(file_path: str) -> str:
     return mapping.get(ext, "text")
 
 
+def _calculate_wrapped_height(text: str, pane_width: int = 65, min_h: int = 6, max_h: int = 35) -> int:
+    """Estimates visual line height accounting for soft text wrapping across pane columns."""
+    if not text:
+        return min_h
+    import math
+    lines = str(text).splitlines() or [""]
+    effective_col_width = max(20, pane_width - 8)
+    total_visual_lines = sum(max(1, math.ceil(len(line) / effective_col_width)) for line in lines)
+    return min(max(total_visual_lines + 2, min_h), max_h)
+
+
+class SelectableTextArea(TextArea):
+    """Subclass of TextArea with expanded standard copy keybindings."""
+
+    BINDINGS = TextArea.BINDINGS + [
+        Binding("c", "copy_selected", "Copy", show=False),
+        Binding("alt+c,meta+c", "copy", "Copy", show=False),
+    ]
+
+    def action_copy_selected(self) -> None:
+        """Copies highlighted text if selected, or falls back to app-level smart copy."""
+        if self.selected_text:
+            self.action_copy()
+        elif hasattr(self.app, "action_copy_smart"):
+            self.app.action_copy_smart()
+
+
 class FullscreenReaderModal(ModalScreen):
-    """Full-screen modal for reading files and prompt traces with syntax highlighting and line numbers."""
+    """Full-screen modal for reading files and prompt traces with selectable TextArea and syntax highlighting."""
 
     BINDINGS = [
         Binding("escape,q", "dismiss", "Close", show=True),
         Binding("w", "toggle_wrap", "Toggle Wrap", show=True),
+        Binding("c,ctrl+c,super+c,alt+c,meta+c", "copy_modal_content", "Copy", show=True),
     ]
 
     def __init__(
@@ -117,48 +148,58 @@ class FullscreenReaderModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-container"):
-            yield Static(f" [bold white]═══ {self.reader_title} ═══[/bold white] (Press ESC or Q to close, W to toggle wrap)", id="modal-header")
-            with VerticalScroll(id="modal-scroll"):
-                yield Static(id="modal-body")
+            yield Static(f" [bold white]═══ {self.reader_title} ═══[/bold white] (Press ESC/Q to close, W to wrap, click & drag to select text, C / Ctrl+C to copy)", id="modal-header")
+            yield SelectableTextArea(
+                "",
+                id="modal-text-area",
+                read_only=True,
+                show_line_numbers=True,
+            )
 
     def on_mount(self) -> None:
         self._render_content()
+        try:
+            self.query_one("#modal-text-area", TextArea).focus()
+        except Exception:
+            pass
 
     def action_toggle_wrap(self) -> None:
         self.wrap_mode = not self.wrap_mode
         self._render_content()
 
+    def action_copy_modal_content(self) -> None:
+        """Copies reader content directly to OS clipboard."""
+        ta = self.query_one("#modal-text-area", TextArea)
+        text_to_copy = ta.selected_text or ta.text
+        if text_to_copy:
+            try:
+                self.app.copy_to_clipboard(text_to_copy)
+                self.notify("✓ Copied selection to clipboard.")
+            except Exception as e:
+                self.notify(f"Copy error: {e}", severity="error")
+
     def _render_content(self) -> None:
-        body = self.query_one("#modal-body", Static)
+        ta = self.query_one("#modal-text-area", TextArea)
+        lang = "text"
+        text_content = ""
         if self.file_path and os.path.exists(self.file_path):
             try:
                 with open(self.file_path, "r", encoding="utf-8", errors="replace") as f:
                     text_content = f.read()
-
-                if self.is_markdown:
-                    body.update(Markdown(text_content))
-                else:
-                    lexer = get_syntax_lexer_for_path(self.file_path)
-                    body.update(Syntax(
-                        text_content,
-                        lexer,
-                        theme=self.syntax_theme,
-                        line_numbers=True,
-                        word_wrap=self.wrap_mode,
-                    ))
+                lang = get_syntax_lexer_for_path(self.file_path)
             except Exception as e:
-                body.update(f"Error reading file: {e}")
+                text_content = f"Error reading file: {e}"
         elif self.raw_content is not None:
+            text_content = self.raw_content
             if self.is_markdown:
-                body.update(Markdown(self.raw_content))
-            else:
-                body.update(Syntax(
-                    self.raw_content,
-                    "text",
-                    theme=self.syntax_theme,
-                    line_numbers=False,
-                    word_wrap=self.wrap_mode,
-                ))
+                lang = "markdown"
+
+        ta.text = text_content
+        try:
+            ta.language = lang
+            ta.theme = self.syntax_theme
+        except Exception:
+            pass
 
 
 class AgyWatchApp(App):
@@ -244,8 +285,16 @@ class AgyWatchApp(App):
         height: 1fr;
     }
 
+    #tab-details {
+        height: 1fr;
+        padding: 0;
+    }
+
     #inspector-scroll {
         height: 1fr;
+        overflow-y: auto;
+        scrollbar-gutter: stable;
+        padding: 0 1;
     }
 
     #artifacts-master-detail {
@@ -290,21 +339,39 @@ class AgyWatchApp(App):
     }
 
     #modal-container {
-        width: 90%;
-        height: 90%;
+        width: 92%;
+        height: 92%;
         background: $surface;
         border: thick $accent;
-        padding: 1 2;
+        padding: 1 1;
     }
 
     #modal-header {
         background: $panel;
         padding: 0 1;
         margin-bottom: 1;
+        height: auto;
     }
 
-    #modal-scroll {
+    #modal-text-area {
         height: 1fr;
+        border: none;
+        background: $background;
+    }
+
+    .section-title {
+        color: $primary;
+        text-style: bold;
+        margin-top: 1;
+    }
+
+    .selectable-area {
+        height: auto;
+        min-height: 4;
+        max-height: 16;
+        border: solid $accent;
+        background: $panel;
+        margin-bottom: 1;
     }
     """
 
@@ -312,11 +379,11 @@ class AgyWatchApp(App):
         Binding("q", "quit", "Quit", show=True),
         Binding("space", "toggle_follow", "Follow/Pause", show=True),
         Binding("f", "fullscreen_inspect", "Fullscreen", show=True),
-        Binding("p", "cycle_syntax_theme", "Theme", show=True),
+        Binding("p,s", "cycle_syntax_theme", "Theme", show=True),
         Binding("o", "open_selected_media_external", "Open External", show=True),
         Binding("a", "toggle_inspector_tab", "Toggle Tab", show=True),
-        Binding("t", "toggle_tree_mode", "Tree/Flat View", show=True),
-        Binding("c", "copy_payload", "Copy", show=True),
+        Binding("t", "toggle_tree_mode", "Tree/Flat", show=True),
+        Binding("c,ctrl+c,super+c,alt+c,meta+c", "copy_smart", "Copy", show=True),
         Binding("r", "force_refresh_sessions", "Refresh", show=True),
         Binding("0", "filter_all_agents", "All Agents", show=False),
         Binding("1", "filter_subagent_1", "Subagent 1", show=False),
@@ -373,7 +440,18 @@ class AgyWatchApp(App):
                 with TabbedContent(id="inspector-tabs"):
                     with TabPane("Event Details", id="tab-details"):
                         with VerticalScroll(id="inspector-scroll"):
-                            yield Static("Select an event from the timeline to view details.", id="inspector-content")
+                            yield Static("Select an event from the timeline to view details.", id="inspector-meta")
+                            yield Static("", id="inspector-prompt-title", classes="section-title")
+                            yield SelectableTextArea("", id="inspector-prompt-area", classes="selectable-area", read_only=True, show_line_numbers=False)
+                            yield Static("", id="inspector-tool-card")
+                            yield Static("", id="inspector-response-title", classes="section-title")
+                            yield SelectableTextArea("", id="inspector-response-area", classes="selectable-area", read_only=True, show_line_numbers=False)
+                            yield Static("", id="inspector-thinking-title", classes="section-title")
+                            yield SelectableTextArea("", id="inspector-thinking-area", classes="selectable-area", read_only=True, show_line_numbers=False)
+                            yield Static("", id="inspector-json-title", classes="section-title")
+                            yield SelectableTextArea("", id="inspector-json-area", classes="selectable-area", read_only=True, language="json")
+                            yield Static("", id="inspector-artifacts-area")
+                            yield Static("", id="inspector-tokens-area")
                     with TabPane("Artifacts & Files", id="tab-artifacts"):
                         with Vertical(id="artifacts-master-detail"):
                             with Vertical(id="artifacts-list-container"):
@@ -700,13 +778,34 @@ class AgyWatchApp(App):
         return t
 
     def _render_inspector_event(self, ev: Dict[str, Any]) -> None:
-        """Renders full scrollable inspection details in the Details tab."""
-        inspector = self.query_one("#inspector-content", Static)
-        if not ev:
-            inspector.update("No event selected.")
-            return
+        """Renders full scrollable inspection details in the Details tab with selectable controls."""
+        meta = self.query_one("#inspector-meta", Static)
+        p_title = self.query_one("#inspector-prompt-title", Static)
+        p_area = self.query_one("#inspector-prompt-area", TextArea)
+        t_card = self.query_one("#inspector-tool-card", Static)
+        resp_title = self.query_one("#inspector-response-title", Static)
+        resp_area = self.query_one("#inspector-response-area", TextArea)
+        th_title = self.query_one("#inspector-thinking-title", Static)
+        th_area = self.query_one("#inspector-thinking-area", TextArea)
+        json_title = self.query_one("#inspector-json-title", Static)
+        json_area = self.query_one("#inspector-json-area", TextArea)
+        art_area = self.query_one("#inspector-artifacts-area", Static)
+        tok_area = self.query_one("#inspector-tokens-area", Static)
 
-        items: List[Any] = []
+        if not ev:
+            meta.update("No event selected.")
+            p_title.display = False
+            p_area.display = False
+            t_card.display = False
+            resp_title.display = False
+            resp_area.display = False
+            th_title.display = False
+            th_area.display = False
+            json_title.display = False
+            json_area.display = False
+            art_area.display = False
+            tok_area.display = False
+            return
 
         sub_tag = ev.get("subagent_id") or ev.get("trajectory_id") or "sub"
         actor_label = "Root Agent" if ev.get("is_main") else f"Subagent ({sub_tag})"
@@ -714,45 +813,89 @@ class AgyWatchApp(App):
         t = Text()
         t.append(f"Event ID: {ev.get('id')} | Seq: {ev.get('seq_num')} | Direction: {ev.get('direction')}\n", style="bold cyan")
         t.append(f"Type: {ev.get('step_type')} ({ev.get('message_type')})\n", style="bold yellow")
-        t.append(f"Actor: {actor_label}\n\n", style="magenta")
-        items.append(t)
+        t.append(f"Actor: {actor_label}\n", style="magenta")
+        meta.update(t)
 
-        # 1. User / Subagent Prompt
-        if ev.get("prompt"):
-            header_title = "SUBAGENT INSTRUCTION PROMPT" if ev.get("step_type") == "SUBAGENT_PROMPT" else "USER PROMPT"
-            prompt_t = Text()
-            prompt_t.append(f"─── {header_title} ───\n", style="bold green")
-            prompt_t.append(f"{ev['prompt']}\n\n", style="white")
-            items.append(prompt_t)
+        tool_name = ev.get("tool_name")
+        args = ev.get("tool_args") or {}
 
-        # 2. Tool Arguments / Calls (Dedicated Domain-Specific Visualizer Card)
-        if ev.get("tool_name") or ev.get("step_type") == "TOOL_CALL":
-            tool_card = render_tool_event(ev, syntax_theme=self.settings.syntax_theme)
-            items.append(tool_card)
-            items.append(Text("\n"))
+        # 1. Prompt (User prompt, subagent instruction prompt, or image prompt)
+        prompt_text = ev.get("prompt")
+        if not prompt_text and (tool_name == "generate_image" or "prompt" in args or "Prompt" in args):
+            prompt_text = args.get("prompt") or args.get("Prompt")
 
-        # 3. Subagent Reports
-        if ev.get("subagent_report"):
-            rep_t = Text()
-            rep_t.append(f"─── SUBAGENT REPORT (Sender: {sub_tag}) ───\n", style="bold blue")
-            rep_t.append(f"{ev['subagent_report']}\n\n", style="bright_blue")
-            items.append(rep_t)
+        if prompt_text:
+            header_title = "SUBAGENT INSTRUCTION PROMPT" if ev.get("step_type") == "SUBAGENT_PROMPT" else ("GENERATED IMAGE PROMPT" if tool_name == "generate_image" else "USER PROMPT")
+            p_title.display = True
+            p_title.update(f"─── {header_title} (Selectable) ───")
+            p_area.display = True
+            p_area.text = str(prompt_text)
+            try:
+                p_area.theme = self.settings.syntax_theme
+            except Exception:
+                pass
+            p_area.styles.height = _calculate_wrapped_height(prompt_text, min_h=6, max_h=20)
+        else:
+            p_title.display = False
+            p_area.display = False
 
-        # 4. Model Text Responses (only if not already a tool card)
-        if ev.get("text") and not ev.get("tool_name"):
-            resp_t = Text()
-            resp_t.append("─── MODEL RESPONSE ───\n", style="bold white")
-            resp_t.append(f"{ev['text']}\n\n", style="bright_white")
-            items.append(resp_t)
+        # 2. Tool Visualizer Card
+        if tool_name or ev.get("step_type") == "TOOL_CALL":
+            tool_card_renderable = render_tool_event(ev, syntax_theme=self.settings.syntax_theme)
+            t_card.display = True
+            t_card.update(tool_card_renderable)
+        else:
+            t_card.display = False
 
-        # 5. Model Thinking
+        # 3. Model Text Response
+        if ev.get("text") and not tool_name:
+            resp_title.display = True
+            resp_title.update("─── MODEL RESPONSE (Selectable) ───")
+            resp_area.display = True
+            resp_area.text = str(ev["text"])
+            try:
+                resp_area.theme = self.settings.syntax_theme
+            except Exception:
+                pass
+            resp_area.styles.height = _calculate_wrapped_height(ev["text"], min_h=8, max_h=30)
+        else:
+            resp_title.display = False
+            resp_area.display = False
+
+        # 4. Model Thinking / Reasoning
         if ev.get("thinking"):
-            th_t = Text()
-            th_t.append("─── MODEL REASONING (THINKING) ───\n", style="bold bright_black")
-            th_t.append(f"{ev['thinking']}\n\n", style="italic bright_black")
-            items.append(th_t)
+            th_title.display = True
+            th_title.update("─── MODEL REASONING (Selectable) ───")
+            th_area.display = True
+            th_area.text = str(ev["thinking"])
+            try:
+                th_area.theme = self.settings.syntax_theme
+            except Exception:
+                pass
+            th_area.styles.height = _calculate_wrapped_height(ev["thinking"], min_h=6, max_h=20)
+        else:
+            th_title.display = False
+            th_area.display = False
 
-        # 6. Artifacts & Generated Media on this step
+        # 5. Universal Selectable JSON representation for EVERY event
+        json_payload = ev.get("payload") or ev.get("tool_args") or ev
+        try:
+            formatted_json = json.dumps(json_payload, indent=2)
+        except Exception:
+            formatted_json = str(json_payload)
+
+        json_title.display = True
+        json_title.update("─── EVENT PAYLOAD & DATA (Selectable JSON) ───")
+        json_area.display = True
+        json_area.text = formatted_json
+        try:
+            json_area.language = "json"
+            json_area.theme = self.settings.syntax_theme
+        except Exception:
+            pass
+        json_area.styles.height = _calculate_wrapped_height(formatted_json, min_h=8, max_h=35)
+
+        # 6. Artifacts List
         artifacts = ev.get("artifacts") or []
         if artifacts:
             art_t = Text()
@@ -764,18 +907,20 @@ class AgyWatchApp(App):
                 exists_style = "green" if art["exists"] else "red"
                 art_t.append_text(Text.from_markup(f"{status_icon}[bold white]{art['filename']}[/bold white] ({art['type']}) - [{exists_style}]{exists_str}[/{exists_style}] - {size_kb}\n"))
                 art_t.append(f"  Location: {art['path']}\n", style="bright_black")
-            art_t.append("\n")
-            items.append(art_t)
+            art_area.display = True
+            art_area.update(art_t)
+        else:
+            art_area.display = False
 
         # 7. Turn Tokens
         if ev.get("tokens"):
             tok_t = Text()
             tok_t.append("─── TURN TOKEN USAGE ───\n", style="bold cyan")
-            tok_t.append(f"{json.dumps(ev['tokens'], indent=2)}\n\n", style="cyan")
-            items.append(tok_t)
-
-        from rich.console import Group
-        inspector.update(Group(*items) if len(items) > 1 else items[0])
+            tok_t.append(f"{json.dumps(ev['tokens'], indent=2)}\n", style="cyan")
+            tok_area.display = True
+            tok_area.update(tok_t)
+        else:
+            tok_area.display = False
 
         # Dynamically show/hide Artifacts & Files tab based on event artifacts
         try:
@@ -993,23 +1138,73 @@ class AgyWatchApp(App):
             wrap_mode=self.settings.wrap_text,
         ))
 
-    def action_copy_payload(self) -> None:
-        """Copies active step content/JSON to system clipboard."""
+    def copy_to_clipboard(self, text: str) -> None:
+        """Copies text directly to native OS system clipboard (pbcopy, wl-copy, xclip, clip.exe) and emits OSC 52."""
+        if not text:
+            return
+
+        # 1. Native OS system clipboard
+        copy_to_system_clipboard(text)
+
+        # 2. OSC 52 fallback for SSH/remote sessions
+        try:
+            super().copy_to_clipboard(text)
+        except Exception:
+            pass
+
+    def _extract_event_copy_text(self, ev: Dict[str, Any]) -> str:
+        """Extracts plain text / payload representation of an event for clipboard copy."""
+        if not ev:
+            return ""
+        if ev.get("payload"):
+            try:
+                return json.dumps(ev["payload"], indent=2)
+            except Exception:
+                pass
+        if ev.get("tool_response_raw"):
+            return str(ev["tool_response_raw"])
+        if ev.get("text"):
+            return str(ev["text"])
+        if ev.get("prompt"):
+            return str(ev["prompt"])
+        if ev.get("tool_args"):
+            return json.dumps(ev["tool_args"], indent=2)
+        if ev.get("subagent_report"):
+            return str(ev["subagent_report"])
+        if ev.get("thinking"):
+            return str(ev["thinking"])
+        return json.dumps(ev, indent=2)
+
+    def action_copy_smart(self) -> None:
+        """Copies highlighted text from screen selection, active widget, or full event payload to system clipboard."""
+        # 1. Screen-level text selection (Static cards, Tool visualizers, Diffs)
+        try:
+            screen_text = self.screen.get_selected_text()
+            if screen_text:
+                self.copy_to_clipboard(screen_text)
+                self.notify("✓ Copied screen selection to clipboard.")
+                return
+        except Exception:
+            pass
+
+        # 2. In-widget selection (Prompts, Responses, Reasoning, JSON areas)
+        for ta in self.query(SelectableTextArea):
+            if ta.display and ta.selected_text:
+                self.copy_to_clipboard(ta.selected_text)
+                self.notify("✓ Copied selection to clipboard.")
+                return
+
+        # 3. Active event payload fallback
         if not self.selected_event:
             self.notify("No event selected.", severity="warning")
             return
 
-        try:
-            import subprocess
-            content = json.dumps(self.selected_event.get("payload") or {}, indent=2)
-            if sys.platform == "darwin":
-                p = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
-                p.communicate(content.encode("utf-8"))
-                self.notify("Copied payload JSON to clipboard.")
-            else:
-                self.notify("Clipboard copy supported on macOS (use modal to select/copy).")
-        except Exception as e:
-            self.notify(f"Copy error: {e}", severity="error")
+        content = self._extract_event_copy_text(self.selected_event)
+        if content:
+            self.copy_to_clipboard(content)
+            self.notify("✓ Copied event details to clipboard.")
+
+    action_copy_payload = action_copy_smart
 
     def force_refresh_sessions(self) -> None:
         self.refresh_sessions_list(force=True)

@@ -273,10 +273,16 @@ async def test_tui_app_mount_and_pilot_lifecycle():
 
             list_view = app.query_one("#sessions-list")
             tree = app.query_one("#steps-tree")
-            inspector_content = app.query_one("#inspector-content")
+            inspector_meta = app.query_one("#inspector-meta")
             assert list_view is not None
             assert tree is not None
-            assert inspector_content is not None
+            assert inspector_meta is not None
+
+            # Verify selectable prompt and universal JSON areas exist
+            prompt_area = app.query_one("#inspector-prompt-area")
+            json_area = app.query_one("#inspector-json-area")
+            assert prompt_area is not None
+            assert json_area is not None
 
             # 3. Simulate user keyboard interactions
             await pilot.press("space")  # Toggle follow
@@ -299,11 +305,14 @@ async def test_tui_app_mount_and_pilot_lifecycle():
             await pilot.press("t")      # Switch back to Tree mode
             assert app.tree_mode is True
 
+            # 6. Test copy action (c key)
+            await pilot.press("c")
+
             await pilot.press("r")      # Refresh sessions
             await pilot.press("0")      # Filter all agents
             await pilot.pause()
 
-            # 6. Trigger modal inspection hotkey
+            # 7. Trigger modal inspection hotkey
             await pilot.press("f")
             await pilot.pause()
             # Close modal
