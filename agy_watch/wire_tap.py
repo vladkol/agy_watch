@@ -22,6 +22,8 @@ to a content-addressable blob directory.
 import os
 import time
 import json
+import glob
+import re
 import hashlib
 import sqlite3
 import logging
@@ -289,7 +291,8 @@ class WireTapDB:
 
     def _sync_session_meta(self) -> None:
         """Updates the session_meta table and registers with the machine-wide global registry."""
-        sid = self.session_id or self.cascade_id or os.path.splitext(os.path.basename(self.db_path))[0]
+        real_sid = self.session_id or self.cascade_id
+        sid = real_sid or os.path.splitext(os.path.basename(self.db_path))[0]
         now = time.time()
         title = self.user_title or f"Session {sid[:8]}"
 
@@ -330,30 +333,32 @@ class WireTapDB:
             ))
         conn.close()
 
-        # Update global machine-wide registry
-        try:
-            from agy_watch.registry import get_global_registry
-            registry = get_global_registry()
-            workspace_dir = os.path.dirname(os.path.dirname(self.db_path))
-            registry.register_or_update({
-                "session_id": sid,
-                "cascade_id": self.cascade_id,
-                "title": title,
-                "status": self.status,
-                "workspace_dir": workspace_dir,
-                "db_path": self.db_path,
-                "blobs_dir": self.blob_store.blobs_dir,
-                "pid": os.getpid(),
-                "total_tokens": self.total_tokens,
-                "prompt_tokens": self.prompt_tokens,
-                "candidates_tokens": self.candidates_tokens,
-                "thoughts_tokens": self.thoughts_tokens,
-                "cached_tokens": self.cached_tokens,
-                "subagent_count": len(self.subagents),
-                "step_count": self.step_count,
-            })
-        except Exception as e:
-            logger.debug("Failed to sync session with global registry: %s", e)
+        # Only update global machine-wide registry once real session ID is known
+        if real_sid and real_sid != "wire_tap":
+            try:
+                from agy_watch.registry import get_global_registry
+                registry = get_global_registry()
+                registry.delete_session("wire_tap")
+                workspace_dir = os.path.dirname(os.path.dirname(self.db_path))
+                registry.register_or_update({
+                    "session_id": real_sid,
+                    "cascade_id": self.cascade_id,
+                    "title": title,
+                    "status": self.status,
+                    "workspace_dir": workspace_dir,
+                    "db_path": self.db_path,
+                    "blobs_dir": self.blob_store.blobs_dir,
+                    "pid": os.getpid(),
+                    "total_tokens": self.total_tokens,
+                    "prompt_tokens": self.prompt_tokens,
+                    "candidates_tokens": self.candidates_tokens,
+                    "thoughts_tokens": self.thoughts_tokens,
+                    "cached_tokens": self.cached_tokens,
+                    "subagent_count": len(self.subagents),
+                    "step_count": self.step_count,
+                })
+            except Exception as e:
+                logger.debug("Failed to sync session with global registry: %s", e)
 
 
 class TappedWebSocket:
@@ -432,6 +437,129 @@ def install_wire_tap(save_dir: Optional[str] = None) -> Tuple[WireTapDB, BlobSto
     return wire_tap_db, blob_store
 
 
+def extract_event_artifacts(
+    ev: Dict[str, Any],
+    workspace_dir: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Resolves generated images, markdown files, and media files associated with an event.
+
+    Searches:
+    - Active workspace directory
+    - Global SDK brain storage:
+      ~/.gemini/antigravity/brain/
+      ~/.gemini/jetski/brain/
+      ~/.antigravity/brain/
+    """
+    artifacts: List[Dict[str, Any]] = []
+    seen_paths: Set[str] = set()
+
+    def add_file_if_valid(p: str, kind: str = "file") -> None:
+        if not p:
+            return
+        clean_path = p.replace("file://", "").strip()
+        if not os.path.isabs(clean_path):
+            base_dir = workspace_dir or os.getcwd()
+            clean_path = os.path.abspath(os.path.join(base_dir, clean_path))
+
+        if clean_path in seen_paths:
+            return
+        seen_paths.add(clean_path)
+
+        exists = os.path.exists(clean_path)
+        size = os.path.getsize(clean_path) if exists else 0
+
+        ext = os.path.splitext(clean_path)[1].lower()
+        if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"):
+            kind = "image"
+        elif ext in (".mp4", ".mov", ".webm", ".mkv"):
+            kind = "video"
+        elif ext == ".md":
+            kind = "markdown"
+
+        artifacts.append({
+            "type": kind,
+            "path": clean_path,
+            "filename": os.path.basename(clean_path),
+            "size_bytes": size,
+            "exists": exists,
+        })
+
+    # 1. Check tool arguments for generateImage / generate_image
+    tool_args = ev.get("tool_args") or {}
+    tool_name = ev.get("tool_name") or ""
+    if tool_name in ("generate_image", "generateImage"):
+        img_name = tool_args.get("ImageName") or tool_args.get("imageName") or tool_args.get("image_name") or ""
+        valid_exts = (".png", ".jpg", ".jpeg", ".webp")
+
+        # Search roots: SDK brain paths + workspace dirs
+        found_matches: List[str] = []
+
+        # 1. First priority: session-specific brain directory
+        if session_id:
+            for brain_root in (
+                os.path.expanduser("~/.gemini/antigravity/brain"),
+                os.path.expanduser("~/.gemini/jetski/brain"),
+                os.path.expanduser("~/.antigravity/brain"),
+            ):
+                session_dir = os.path.join(brain_root, session_id)
+                if os.path.isdir(session_dir):
+                    pattern = os.path.join(session_dir, "**", f"*{img_name}*") if img_name else os.path.join(session_dir, "**", "*")
+                    for match in glob.glob(pattern, recursive=True):
+                        if os.path.isfile(match) and os.path.splitext(match)[1].lower() in valid_exts:
+                            found_matches.append(match)
+
+        # 2. Fallback: search all brain roots + workspace dirs
+        if not found_matches:
+            search_roots = [
+                os.path.expanduser("~/.gemini/antigravity/brain"),
+                os.path.expanduser("~/.gemini/jetski/brain"),
+                os.path.expanduser("~/.antigravity/brain"),
+            ]
+            if workspace_dir:
+                search_roots.extend([
+                    os.path.join(workspace_dir, "brain"),
+                    workspace_dir,
+                ])
+
+            for root in search_roots:
+                if not os.path.isdir(root):
+                    continue
+                pattern = os.path.join(root, "**", f"*{img_name}*") if img_name else os.path.join(root, "**", "*")
+                for match in glob.glob(pattern, recursive=True):
+                    if os.path.isfile(match) and os.path.splitext(match)[1].lower() in valid_exts:
+                        found_matches.append(match)
+
+        # Sort by newest modification time if multiple found
+        if found_matches:
+            found_matches.sort(key=os.path.getmtime, reverse=True)
+            for m in found_matches[:1]:
+                add_file_if_valid(m, "image")
+
+    # 2. Check editFile, createFile, viewFile arguments
+    for k in (
+        "filePath", "file_path", "filePath", "TargetFile", "targetFile", "target_file",
+        "AbsolutePath", "absolutePath", "absolute_path", "path",
+    ):
+        if k in tool_args and tool_args[k]:
+            add_file_if_valid(str(tool_args[k]))
+
+    # 3. Check for markdown image links in payload/text/prompt/thinking
+    content_strings = [
+        str(ev.get("text") or ""),
+        str(ev.get("prompt") or ""),
+        str(ev.get("thinking") or ""),
+        str(ev.get("payload") or ""),
+    ]
+    img_pattern = re.compile(r"!\[.*?\]\((file:///)?([^)]+)\)")
+    for c in content_strings:
+        for match in img_pattern.finditer(c):
+            matched_path = match.group(2)
+            add_file_if_valid(matched_path, "image")
+
+    return artifacts
+
+
 def read_trajectory(db_path: str) -> Dict[str, Any]:
     """Reads a wire_tap.db SQLite database and extracts structured execution events."""
     if not os.path.exists(db_path):
@@ -445,6 +573,7 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
     meta_row = cursor.fetchone()
 
     fallback_id = os.path.splitext(os.path.basename(db_path))[0]
+    workspace_dir = os.path.dirname(os.path.dirname(os.path.abspath(db_path)))
     session_info: Dict[str, Any] = {
         "trajectory_id": (meta_row["session_id"] if meta_row and meta_row["session_id"] else fallback_id),
         "cascade_id": (meta_row["cascade_id"] if meta_row and meta_row["cascade_id"] else fallback_id),
@@ -466,13 +595,31 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
 
     events = []
     subagents_set = set()
+    pending_pretool_args: Dict[str, Any] = {}
 
     for row in rows:
-        payload = json.loads(row["payload_json"])
         direction = row["direction"]
         msg_type = row["message_type"]
-        traj_id = row["trajectory_id"]
         is_main = row["is_main"]
+        traj_id = row["trajectory_id"]
+
+        try:
+            payload = json.loads(row["payload_json"])
+        except Exception:
+            payload = {}
+
+        # Buffer PreTool hook arguments
+        if "callHookRequest" in payload or "call_hook_request" in payload:
+            chr_obj = payload.get("callHookRequest") or payload.get("call_hook_request") or {}
+            if chr_obj.get("name") == "PreTool":
+                pt_args = chr_obj.get("preToolArgs") or chr_obj.get("pre_tool_args") or {}
+                tool_name = pt_args.get("toolName") or pt_args.get("tool_name")
+                args_json = pt_args.get("argumentsJson") or pt_args.get("arguments_json")
+                if tool_name and args_json:
+                    try:
+                        pending_pretool_args[tool_name] = json.loads(args_json)
+                    except Exception:
+                        pending_pretool_args[tool_name] = args_json
 
         event = {
             "id": row["id"],
@@ -491,9 +638,43 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
             "tool_id": None,
             "tool_args": None,
             "subagent_report": None,
-            "subagent_id": None,
+            "subagent_id": traj_id if (not is_main and traj_id) else None,
+            "artifacts": [],
             "payload": payload,
         }
+
+        if "toolCall" in payload or "tool_call" in payload:
+            tc_obj = payload.get("toolCall") or payload.get("tool_call") or {}
+            event["step_type"] = "TOOL_CALL"
+            event["tool_name"] = tc_obj.get("name")
+            event["tool_id"] = tc_obj.get("id")
+            args_json = tc_obj.get("argumentsJson") or tc_obj.get("arguments_json")
+            if args_json:
+                try:
+                    event["tool_args"] = json.loads(args_json)
+                except Exception:
+                    event["tool_args"] = args_json
+            else:
+                event["tool_args"] = tc_obj.get("arguments") or {}
+            event["artifacts"] = extract_event_artifacts(event, workspace_dir=workspace_dir, session_id=session_info["trajectory_id"])
+            events.append(event)
+            continue
+
+        if "toolResponse" in payload or "tool_response" in payload:
+            tr_obj = payload.get("toolResponse") or payload.get("tool_response") or {}
+            event["step_type"] = "TOOL_RESPONSE"
+            event["tool_id"] = tr_obj.get("id")
+            resp_json = tr_obj.get("responseJson") or tr_obj.get("response_json")
+            event["text"] = resp_json or tr_obj.get("response") or ""
+            for prev_ev in reversed(events):
+                if prev_ev.get("tool_id") == event["tool_id"]:
+                    if isinstance(prev_ev.get("payload"), dict):
+                        if "stepUpdate" not in prev_ev["payload"] or not isinstance(prev_ev["payload"]["stepUpdate"], dict):
+                            prev_ev["payload"]["stepUpdate"] = {}
+                        prev_ev["payload"]["stepUpdate"]["responseJson"] = resp_json
+                    break
+            events.append(event)
+            continue
 
         if direction == "TO_HARNESS":
             if msg_type == "USER_PROMPT":
@@ -531,6 +712,7 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
                     event["subagent_report"] = su["content"]
 
                 # Check action fields
+                action_detected = False
                 for action_key, action_name in [
                     ("invokeSubagent", "invoke_subagent"),
                     ("invoke_subagent", "invoke_subagent"),
@@ -546,17 +728,44 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
                     ("edit_file", "edit_file"),
                     ("listDirectory", "list_directory"),
                     ("list_directory", "list_directory"),
+                    ("searchDirectory", "search_directory"),
+                    ("search_directory", "search_directory"),
+                    ("findFile", "find_file"),
+                    ("find_file", "find_file"),
+                    ("questionsRequest", "ask_question"),
+                    ("questions_request", "ask_question"),
+                    ("searchWeb", "search_web"),
+                    ("search_web", "search_web"),
+                    ("readUrlContent", "read_url_content"),
+                    ("read_url_content", "read_url_content"),
+                    ("finish", "finish"),
+                    ("customTool", "custom_tool"),
+                    ("custom_tool", "custom_tool"),
+                    ("mcpTool", "mcp_tool"),
+                    ("mcp_tool", "mcp_tool"),
                 ]:
                     if action_key in su:
+                        action_detected = True
                         tc_ev = dict(event)
                         tc_ev["step_type"] = "TOOL_CALL"
                         tc_ev["tool_name"] = action_name
-                        tc_ev["tool_args"] = su[action_key]
+                        raw_args = dict(su[action_key]) if isinstance(su[action_key], dict) else {}
+                        if action_name in pending_pretool_args:
+                            pt_data = pending_pretool_args[action_name]
+                            if isinstance(pt_data, dict):
+                                merged = dict(pt_data)
+                                merged.update(raw_args)
+                                raw_args = merged
+                        tc_ev["tool_args"] = raw_args
                         if not is_main and traj_id:
                             tc_ev["subagent_id"] = traj_id
                             subagents_set.add(traj_id)
+                        tc_ev["artifacts"] = extract_event_artifacts(tc_ev, workspace_dir=workspace_dir, session_id=session_info["trajectory_id"])
                         events.append(tc_ev)
                         break
+
+                if action_detected:
+                    continue
 
                 tool_calls = su.get("toolCalls") or su.get("tool_calls")
                 if tool_calls and isinstance(tool_calls, list):
@@ -565,16 +774,21 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
                         tc_ev["step_type"] = "TOOL_CALL"
                         tc_ev["tool_name"] = tc.get("name")
                         tc_ev["tool_id"] = tc.get("id")
-                        tc_ev["tool_args"] = tc.get("args")
+                        t_args = tc.get("args") or {}
+                        if not t_args and tc_ev["tool_name"] in pending_pretool_args:
+                            t_args = pending_pretool_args[tc_ev["tool_name"]]
+                        tc_ev["tool_args"] = t_args
                         if not is_main and traj_id:
                             tc_ev["subagent_id"] = traj_id
                             subagents_set.add(traj_id)
+                        tc_ev["artifacts"] = extract_event_artifacts(tc_ev, workspace_dir=workspace_dir, session_id=session_info["trajectory_id"])
                         events.append(tc_ev)
                     continue
 
         if not is_main and traj_id:
             subagents_set.add(traj_id)
 
+        event["artifacts"] = extract_event_artifacts(event, workspace_dir=workspace_dir, session_id=session_info["trajectory_id"])
         events.append(event)
 
     conn.close()

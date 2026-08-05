@@ -22,7 +22,16 @@ from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger("agy_watch.settings")
 
-DEFAULT_SETTINGS_PATH = os.path.expanduser("~/.antigravity/samples/agy_watch/settings.json")
+def get_default_settings_path() -> str:
+    """Returns the default settings file path, honoring AGY_WATCH_SETTINGS_PATH if set."""
+    env_path = os.environ.get("AGY_WATCH_SETTINGS_PATH") or os.environ.get("AGY_WATCH_SETTINGS_FILE")
+    if env_path:
+        return os.path.abspath(os.path.expanduser(env_path))
+    home = os.path.expanduser("~")
+    return os.path.join(home, ".antigravity", "samples", "agy_watch", "settings.json")
+
+
+DEFAULT_SETTINGS_PATH = get_default_settings_path()
 
 # Paired themes supported by both Textual App engine and Rich Syntax highlighter
 SUPPORTED_THEMES: List[Dict[str, str]] = [
@@ -50,41 +59,57 @@ class UserSettings:
     auto_follow: bool = True
     active_tab: str = "tab-details"  # "tab-details" or "tab-artifacts"
     wrap_text: bool = True
+    read_only: bool = False
+    _path: Optional[str] = None
 
     @classmethod
-    def load(cls, path: str = DEFAULT_SETTINGS_PATH) -> "UserSettings":
+    def load(cls, path: Optional[str] = None) -> "UserSettings":
         """Loads settings from disk, falling back to defaults if not found or invalid."""
-        if not os.path.exists(path):
-            return cls()
+        target_path = os.path.abspath(os.path.expanduser(path or get_default_settings_path()))
+        if not os.path.exists(target_path):
+            inst = cls()
+            inst._path = target_path
+            return inst
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(target_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
-                    valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
+                    valid_keys = {f.name for f in cls.__dataclass_fields__.values() if not f.name.startswith("_")}
                     filtered = {k: v for k, v in data.items() if k in valid_keys}
-                    return cls(**filtered)
+                    inst = cls(**filtered)
+                    inst._path = target_path
+                    return inst
         except Exception as e:
-            logger.warning("Failed to load settings from %s: %s", path, e)
-        return cls()
+            logger.warning("Failed to load settings from %s: %s", target_path, e)
+        inst = cls()
+        inst._path = target_path
+        return inst
 
-    def save(self, path: str = DEFAULT_SETTINGS_PATH) -> bool:
-        """Saves current settings to disk atomically."""
+    def save(self, path: Optional[str] = None) -> bool:
+        """Saves current settings to disk atomically, unless in read_only mode."""
+        if self.read_only:
+            return True
+        target_path = os.path.abspath(os.path.expanduser(path or self._path or get_default_settings_path()))
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-            temp_path = f"{path}.tmp"
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            temp_path = f"{target_path}.tmp"
+            data = asdict(self)
+            data.pop("_path", None)
+            data.pop("read_only", None)
             with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(asdict(self), f, indent=2)
-            os.replace(temp_path, path)
+                json.dump(data, f, indent=2)
+            os.replace(temp_path, target_path)
+            self._path = target_path
             return True
         except Exception as e:
-            logger.warning("Failed to save settings to %s: %s", path, e)
+            logger.warning("Failed to save settings to %s: %s", target_path, e)
             return False
 
 
 _global_settings: Optional[UserSettings] = None
 
 
-def get_user_settings(path: str = DEFAULT_SETTINGS_PATH) -> UserSettings:
+def get_user_settings(path: Optional[str] = None) -> UserSettings:
     """Returns a singleton instance of UserSettings."""
     global _global_settings
     if _global_settings is None:

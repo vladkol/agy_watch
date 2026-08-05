@@ -42,6 +42,7 @@ from textual.binding import Binding
 from agy_watch.registry import get_global_registry, GlobalRegistry
 from agy_watch.watcher import SessionWatcher
 from agy_watch.settings import get_user_settings, UserSettings, SUPPORTED_THEMES, AVAILABLE_SYNTAX_THEMES
+from agy_watch.tool_renderers import build_tool_tree_label, render_tool_event
 
 
 def open_media_file_cross_platform(file_path: str) -> bool:
@@ -178,9 +179,9 @@ class AgyWatchApp(App):
     }
 
     #sessions-pane {
-        width: 26%;
-        min-width: 28;
-        max-width: 38;
+        width: 28%;
+        min-width: 32;
+        max-width: 44;
         border-right: solid $border;
         background: $surface;
         padding: 0 1;
@@ -195,8 +196,8 @@ class AgyWatchApp(App):
     }
 
     #inspector-pane {
-        width: 36%;
-        min-width: 42;
+        width: 34%;
+        min-width: 40;
         padding: 0 1;
         background: $surface;
     }
@@ -213,15 +214,26 @@ class AgyWatchApp(App):
 
     #sessions-list {
         height: 1fr;
+        background: $surface;
     }
 
-    .session-item {
-        padding: 1 1;
+    #sessions-list > ListItem {
+        padding: 0 1;
+        margin-bottom: 1;
+        background: $panel;
+        border-left: solid $border;
         border-bottom: solid $border-blurred;
     }
 
-    .session-item:hover {
+    #sessions-list > ListItem:hover {
         background: $boost;
+        border-left: solid $primary;
+    }
+
+    #sessions-list > ListItem.--highlight {
+        background: $primary-darken-2;
+        border-left: solid $accent;
+        border-bottom: solid $accent;
     }
 
     #tree-container {
@@ -341,7 +353,8 @@ class AgyWatchApp(App):
         self.seen_artifact_paths: Set[str] = set()
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
+        from agy_watch.formatters import get_header_time_format
+        yield Header(show_clock=True, time_format=get_header_time_format())
         with Horizontal(id="main-layout"):
             # 1. Left: Sessions list
             with Vertical(id="sessions-pane"):
@@ -406,21 +419,28 @@ class AgyWatchApp(App):
 
         list_view.clear()
 
+        from agy_watch.formatters import format_locale_datetime, format_locale_time
+
         for s in sessions:
-            status_icon = "● LIVE" if s["is_live"] else "○ IDLE"
-            status_color = "green" if s["is_live"] else "bright_black"
-            time_str = datetime.fromtimestamp(s.get("updated_at") or 0).strftime("%H:%M:%S")
+            is_live = s.get("is_live", False)
+            status = s.get("status", "")
+            if is_live:
+                status_emoji = "🟢"
+            elif status == "STATE_ERROR":
+                status_emoji = "🔴"
+            else:
+                status_emoji = "⚪"
 
+            time_str = format_locale_datetime(s.get("updated_at") or 0, two_digit_year=True)
             sub_count = s.get("subagent_count", 0)
-            sub_label = f" ({sub_count} workers)" if sub_count > 0 else ""
+            sub_label = f" • {sub_count} worker{'s' if sub_count > 1 else ''}" if sub_count > 0 else ""
             tokens_k = f"{s.get('total_tokens', 0) / 1000:.1f}k tok"
-
             title_snippet = (s.get("title") or "Session")[:30]
 
             item_text = (
-                f"[{status_color}]{status_icon}[/{status_color}] [bold]{s['session_id'][:8]}[/bold] {time_str}\n"
-                f" [cyan]{title_snippet}[/cyan]{sub_label}\n"
-                f" [yellow]{tokens_k}[/yellow]"
+                f"{status_emoji} [bold white]{s['session_id'][:8]}[/bold white]  [dim]{time_str}[/dim]\n"
+                f" [bright_cyan]{title_snippet}[/bright_cyan]\n"
+                f" [bold yellow]{tokens_k}[/bold yellow][dim]{sub_label}[/dim]"
             )
             item = ListItem(Static(item_text), name=s["session_id"])
             list_view.append(item)
@@ -642,13 +662,15 @@ class AgyWatchApp(App):
 
     def _build_event_tree_label(self, ev: Dict[str, Any]) -> Text:
         """Formats an event for the execution tree view."""
-        ts_str = datetime.fromtimestamp(ev.get("timestamp") or 0).strftime("%H:%M:%S")
+        from agy_watch.formatters import format_locale_time
+        ts_str = format_locale_time(ev.get("timestamp"))
         direction = ev.get("direction")
         msg_type = ev.get("message_type")
         step_type = ev.get("step_type")
         is_main = ev.get("is_main", True)
 
-        actor_tag = "[ROOT]" if is_main else f"[SUB {str(ev.get('subagent_id', ''))[:6]}]"
+        sub_tag = ev.get("subagent_id") or ev.get("trajectory_id") or "sub"
+        actor_tag = "[ROOT]" if is_main else f"[SUB {str(sub_tag)[:6]}]"
         actor_style = "bold magenta" if is_main else "bold cyan"
 
         t = Text()
@@ -663,16 +685,9 @@ class AgyWatchApp(App):
             t.append(" SUBAGENT_PROMPT: ", style="bold green")
             t.append(f"{(ev.get('prompt') or '')[:35]}...", style="green")
         elif step_type == "TOOL_CALL":
-            tool_name = ev.get("tool_name") or "tool"
-            t.append(f" TOOL: {tool_name}", style="bold yellow")
-            if tool_name == "generate_image":
-                img_name = ev.get("tool_args", {}).get("ImageName") or ev.get("tool_args", {}).get("imageName") or ""
-                if img_name:
-                    t.append(f" ({img_name})", style="italic bright_magenta")
-            elif tool_name == "invoke_subagent":
-                sub_count = len(ev.get("tool_args", {}).get("Subagents", []))
-                if sub_count > 0:
-                    t.append(f" ({sub_count} workers)", style="italic bright_yellow")
+            t.append(" ")
+            tool_label = build_tool_tree_label(ev)
+            t.append_text(tool_label)
         elif step_type == "SUBAGENT_REPORT":
             t.append(" SUBAGENT_REPORT", style="bold blue")
         elif step_type == "TEXT_RESPONSE":
@@ -691,65 +706,76 @@ class AgyWatchApp(App):
             inspector.update("No event selected.")
             return
 
+        items: List[Any] = []
+
+        sub_tag = ev.get("subagent_id") or ev.get("trajectory_id") or "sub"
+        actor_label = "Root Agent" if ev.get("is_main") else f"Subagent ({sub_tag})"
+
         t = Text()
         t.append(f"Event ID: {ev.get('id')} | Seq: {ev.get('seq_num')} | Direction: {ev.get('direction')}\n", style="bold cyan")
         t.append(f"Type: {ev.get('step_type')} ({ev.get('message_type')})\n", style="bold yellow")
-        t.append(f"Actor: {'Root Agent' if ev.get('is_main') else f'Subagent ({ev.get('subagent_id')})'}\n\n", style="magenta")
+        t.append(f"Actor: {actor_label}\n\n", style="magenta")
+        items.append(t)
 
         # 1. User / Subagent Prompt
         if ev.get("prompt"):
             header_title = "SUBAGENT INSTRUCTION PROMPT" if ev.get("step_type") == "SUBAGENT_PROMPT" else "USER PROMPT"
-            t.append(f"─── {header_title} ───\n", style="bold green")
-            t.append(f"{ev['prompt']}\n\n", style="white")
+            prompt_t = Text()
+            prompt_t.append(f"─── {header_title} ───\n", style="bold green")
+            prompt_t.append(f"{ev['prompt']}\n\n", style="white")
+            items.append(prompt_t)
 
-        # 2. Tool Arguments / Calls (including correlated invoke_subagent subagents)
-        if ev.get("tool_name"):
-            t.append(f"─── TOOL CALL: {ev['tool_name']} ───\n", style="bold yellow")
-            tool_args = ev.get("tool_args") or {}
-            if ev["tool_name"] == "invoke_subagent" and "Subagents" in tool_args:
-                subagents = tool_args["Subagents"]
-                t.append(f"Spawning {len(subagents)} Subagent(s):\n", style="bold bright_yellow")
-                for i, sub in enumerate(subagents, 1):
-                    t.append(f"  {i}. Role: {sub.get('Role', 'Worker')} | Type: {sub.get('TypeName', 'self')}\n", style="bright_cyan")
-                    t.append(f"     Prompt: {sub.get('Prompt', '')}\n\n", style="white")
-            else:
-                args_formatted = json.dumps(tool_args, indent=2)
-                t.append(f"Arguments:\n{args_formatted}\n\n", style="bright_yellow")
+        # 2. Tool Arguments / Calls (Dedicated Domain-Specific Visualizer Card)
+        if ev.get("tool_name") or ev.get("step_type") == "TOOL_CALL":
+            tool_card = render_tool_event(ev, syntax_theme=self.settings.syntax_theme)
+            items.append(tool_card)
+            items.append(Text("\n"))
 
         # 3. Subagent Reports
         if ev.get("subagent_report"):
-            t.append(f"─── SUBAGENT REPORT (Sender: {ev.get('subagent_id')}) ───\n", style="bold blue")
-            t.append(f"{ev['subagent_report']}\n\n", style="bright_blue")
+            rep_t = Text()
+            rep_t.append(f"─── SUBAGENT REPORT (Sender: {sub_tag}) ───\n", style="bold blue")
+            rep_t.append(f"{ev['subagent_report']}\n\n", style="bright_blue")
+            items.append(rep_t)
 
-        # 4. Model Text Responses
-        if ev.get("text"):
-            t.append("─── MODEL RESPONSE ───\n", style="bold white")
-            t.append(f"{ev['text']}\n\n", style="bright_white")
+        # 4. Model Text Responses (only if not already a tool card)
+        if ev.get("text") and not ev.get("tool_name"):
+            resp_t = Text()
+            resp_t.append("─── MODEL RESPONSE ───\n", style="bold white")
+            resp_t.append(f"{ev['text']}\n\n", style="bright_white")
+            items.append(resp_t)
 
         # 5. Model Thinking
         if ev.get("thinking"):
-            t.append("─── MODEL REASONING (THINKING) ───\n", style="bold bright_black")
-            t.append(f"{ev['thinking']}\n\n", style="italic bright_black")
+            th_t = Text()
+            th_t.append("─── MODEL REASONING (THINKING) ───\n", style="bold bright_black")
+            th_t.append(f"{ev['thinking']}\n\n", style="italic bright_black")
+            items.append(th_t)
 
         # 6. Artifacts & Generated Media on this step
         artifacts = ev.get("artifacts") or []
         if artifacts:
-            t.append("─── STEP ARTIFACTS & MEDIA (Press 'f' to view, 'o' for external) ───\n", style="bold green")
+            art_t = Text()
+            art_t.append("─── STEP ARTIFACTS & MEDIA (Press 'f' to view, 'o' for external) ───\n", style="bold green")
             for art in artifacts:
                 status_icon = "🖼️ " if art["type"] == "image" else ("🎬 " if art["type"] == "video" else ("📄 " if art["type"] == "markdown" else "💻 "))
                 size_kb = f"{art['size_bytes'] / 1024:.1f} KB" if art["size_bytes"] > 0 else "0 KB"
                 exists_str = "[Found on disk]" if art["exists"] else "[Missing]"
                 exists_style = "green" if art["exists"] else "red"
-                t.append(f"{status_icon}[bold white]{art['filename']}[/bold white] ({art['type']}) - [{exists_style}]{exists_str}[/{exists_style}] - {size_kb}\n", style="bright_green")
-                t.append(f"  Location: {art['path']}\n", style="bright_black")
-            t.append("\n")
+                art_t.append_text(Text.from_markup(f"{status_icon}[bold white]{art['filename']}[/bold white] ({art['type']}) - [{exists_style}]{exists_str}[/{exists_style}] - {size_kb}\n"))
+                art_t.append(f"  Location: {art['path']}\n", style="bright_black")
+            art_t.append("\n")
+            items.append(art_t)
 
         # 7. Turn Tokens
         if ev.get("tokens"):
-            t.append("─── TURN TOKEN USAGE ───\n", style="bold cyan")
-            t.append(f"{json.dumps(ev['tokens'], indent=2)}\n\n", style="cyan")
+            tok_t = Text()
+            tok_t.append("─── TURN TOKEN USAGE ───\n", style="bold cyan")
+            tok_t.append(f"{json.dumps(ev['tokens'], indent=2)}\n\n", style="cyan")
+            items.append(tok_t)
 
-        inspector.update(t)
+        from rich.console import Group
+        inspector.update(Group(*items) if len(items) > 1 else items[0])
 
         # Dynamically show/hide Artifacts & Files tab based on event artifacts
         try:

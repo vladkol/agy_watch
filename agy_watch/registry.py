@@ -41,6 +41,8 @@ class GlobalRegistry:
     def __init__(self, db_path: Optional[str] = None):
         if db_path:
             self.db_path = os.path.abspath(db_path)
+        elif os.environ.get("AGY_WATCH_REGISTRY_DB"):
+            self.db_path = os.path.abspath(os.environ["AGY_WATCH_REGISTRY_DB"])
         else:
             home = os.path.expanduser("~")
             reg_dir = os.path.join(home, ".antigravity", "samples", "agy_watch")
@@ -88,39 +90,38 @@ class GlobalRegistry:
         """Registers or updates a session entry in the global registry."""
         sid = session_data["session_id"]
         now = time.time()
-
         conn = self._get_connection()
         with conn:
             conn.execute("""
             INSERT INTO global_sessions (
                 session_id, cascade_id, title, status, workspace_dir, db_path, blobs_dir,
-                pid, total_tokens, prompt_tokens, candidates_tokens, thoughts_tokens,
-                cached_tokens, subagent_count, step_count, created_at, updated_at
+                pid, total_tokens, prompt_tokens, candidates_tokens, thoughts_tokens, cached_tokens,
+                subagent_count, step_count, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
-                cascade_id=coalesce(excluded.cascade_id, global_sessions.cascade_id),
-                title=coalesce(excluded.title, global_sessions.title),
-                status=excluded.status,
-                workspace_dir=coalesce(excluded.workspace_dir, global_sessions.workspace_dir),
-                db_path=excluded.db_path,
-                blobs_dir=excluded.blobs_dir,
-                pid=excluded.pid,
-                total_tokens=excluded.total_tokens,
-                prompt_tokens=excluded.prompt_tokens,
-                candidates_tokens=excluded.candidates_tokens,
-                thoughts_tokens=excluded.thoughts_tokens,
-                cached_tokens=excluded.cached_tokens,
-                subagent_count=excluded.subagent_count,
-                step_count=excluded.step_count,
-                updated_at=excluded.updated_at
+                cascade_id = COALESCE(excluded.cascade_id, global_sessions.cascade_id),
+                title = COALESCE(excluded.title, global_sessions.title),
+                status = COALESCE(excluded.status, global_sessions.status),
+                workspace_dir = COALESCE(excluded.workspace_dir, global_sessions.workspace_dir),
+                db_path = COALESCE(excluded.db_path, global_sessions.db_path),
+                blobs_dir = COALESCE(excluded.blobs_dir, global_sessions.blobs_dir),
+                pid = COALESCE(excluded.pid, global_sessions.pid),
+                total_tokens = CASE WHEN excluded.total_tokens > 0 THEN excluded.total_tokens ELSE global_sessions.total_tokens END,
+                prompt_tokens = CASE WHEN excluded.prompt_tokens > 0 THEN excluded.prompt_tokens ELSE global_sessions.prompt_tokens END,
+                candidates_tokens = CASE WHEN excluded.candidates_tokens > 0 THEN excluded.candidates_tokens ELSE global_sessions.candidates_tokens END,
+                thoughts_tokens = CASE WHEN excluded.thoughts_tokens > 0 THEN excluded.thoughts_tokens ELSE global_sessions.thoughts_tokens END,
+                cached_tokens = CASE WHEN excluded.cached_tokens > 0 THEN excluded.cached_tokens ELSE global_sessions.cached_tokens END,
+                subagent_count = CASE WHEN excluded.subagent_count > 0 THEN excluded.subagent_count ELSE global_sessions.subagent_count END,
+                step_count = CASE WHEN excluded.step_count > 0 THEN excluded.step_count ELSE global_sessions.step_count END,
+                updated_at = excluded.updated_at;
             """, (
                 sid,
-                session_data.get("cascade_id"),
-                session_data.get("title", f"Session {sid[:8]}"),
+                session_data.get("cascade_id", sid),
+                session_data.get("title", f"Session ({sid[:8]})"),
                 session_data.get("status", "STATE_ACTIVE"),
-                session_data.get("workspace_dir"),
-                session_data.get("db_path"),
-                session_data.get("blobs_dir"),
+                session_data.get("workspace_dir", ""),
+                session_data.get("db_path", ""),
+                session_data.get("blobs_dir", ""),
                 session_data.get("pid"),
                 session_data.get("total_tokens", 0),
                 session_data.get("prompt_tokens", 0),
@@ -134,18 +135,38 @@ class GlobalRegistry:
             ))
         conn.close()
 
-    def list_sessions(self, limit: int = 100) -> List[Dict[str, Any]]:
+    def delete_session(self, session_id: str) -> None:
+        """Deletes a session entry by ID."""
+        conn = self._get_connection()
+        with conn:
+            conn.execute("DELETE FROM global_sessions WHERE session_id = ?;", (session_id,))
+        conn.close()
+
+    def list_sessions(self, limit: int = 100, prune_missing: bool = False) -> List[Dict[str, Any]]:
         """Returns all registered sessions sorted by most recent activity, with live process status."""
         conn = self._get_connection()
         conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM global_sessions ORDER BY updated_at DESC LIMIT ?", (limit,))
-        rows = cur.fetchall()
-        conn.close()
+        with conn:
+            # Automatically clean up any legacy placeholder entries
+            conn.execute("DELETE FROM global_sessions WHERE session_id = 'wire_tap';")
+            rows = conn.execute("""
+            SELECT * FROM global_sessions
+            WHERE session_id != 'wire_tap'
+            ORDER BY updated_at DESC
+            LIMIT ?;
+            """, (limit,)).fetchall()
 
         results = []
+        stale_ids = []
         for r in rows:
             d = dict(r)
+            db_p = d.get("db_path", "")
+
+            # If pruning requested and database file does not exist, mark for removal
+            if prune_missing and db_p and not os.path.exists(db_p):
+                stale_ids.append(d["session_id"])
+                continue
+
             pid = d.get("pid")
             status = d.get("status")
 
@@ -154,6 +175,11 @@ class GlobalRegistry:
             pid_alive = is_pid_alive(pid) if pid else False
             d["is_live"] = is_active_state and pid_alive
             results.append(d)
+
+        if stale_ids:
+            with conn:
+                conn.executemany("DELETE FROM global_sessions WHERE session_id = ?;", [(sid,) for sid in stale_ids])
+        conn.close()
 
         return results
 
@@ -185,8 +211,13 @@ _default_registry: Optional[GlobalRegistry] = None
 
 
 def get_global_registry() -> GlobalRegistry:
-    """Returns the singleton GlobalRegistry instance."""
+    """Returns the singleton GlobalRegistry instance, honoring AGY_WATCH_REGISTRY_DB if set."""
     global _default_registry
-    if _default_registry is None:
+    if _default_registry is not None:
+        return _default_registry
+    env_path = os.environ.get("AGY_WATCH_REGISTRY_DB")
+    if env_path:
+        _default_registry = GlobalRegistry(db_path=env_path)
+    else:
         _default_registry = GlobalRegistry()
     return _default_registry

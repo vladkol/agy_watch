@@ -81,19 +81,28 @@ def list_cmd(status: str, limit: int, out_json: bool, out_yaml: bool) -> None:
         click.echo(click.style("No agent sessions found in registry (~/.antigravity/samples/agy_watch/registry.db).", fg="yellow"))
         return
 
-    click.echo(click.style(f"{'STATUS':<8} {'SESSION ID':<18} {'WORKERS':<8} {'TOKENS':<10} {'TITLE':<35} {'UPDATED'}", bold=True))
-    click.echo("─" * 95)
+    from agy_watch.formatters import format_locale_datetime
+
+    click.echo(click.style(f"{'STATUS':<6} {'SESSION ID':<18} {'WORKERS':<8} {'TOKENS':<10} {'TITLE':<32} {'UPDATED'}", bold=True))
+    click.echo("─" * 102)
 
     for s in sessions:
         is_live = s.get("is_live", False)
-        status_tag = click.style("● LIVE", fg="green", bold=True) if is_live else click.style("○ IDLE", fg="bright_black")
+        status = s.get("status", "")
+        if is_live:
+            status_emoji = "🟢"
+        elif status == "STATE_ERROR":
+            status_emoji = "🔴"
+        else:
+            status_emoji = "⚪"
+
         sid = s["session_id"][:16]
         workers = f"{s.get('subagent_count', 0)} subs"
         tokens = f"{s.get('total_tokens', 0) / 1000:.1f}k tok"
-        title = (s.get("title") or "Session")[:33]
-        updated = time.strftime("%H:%M:%S", time.localtime(s.get("updated_at", 0)))
+        title = (s.get("title") or "Session")[:30]
+        updated = format_locale_datetime(s.get("updated_at", 0), two_digit_year=True)
 
-        click.echo(f"{status_tag:<17} {sid:<18} {workers:<8} {tokens:<10} {title:<35} {updated}")
+        click.echo(f"  {status_emoji}    {sid:<18} {workers:<8} {tokens:<10} {title:<32} {updated}")
 
 
 @main.command("attach")
@@ -136,8 +145,8 @@ def tail_cmd(session_id: str, follow: bool, poll_interval: float, out_json: bool
                 elif out_yaml:
                     click.echo(yaml.dump([ev], sort_keys=False))
                 else:
-                    ts = time.strftime("%H:%M:%S", time.localtime(ev.get("timestamp", 0)))
-                    actor = click.style("ROOT AGENT", fg="magenta", bold=True) if ev.get("is_main") else click.style(f"SUBAGENT ({ev.get('subagent_id', '')[:8]})", fg="cyan", bold=True)
+                    sub_tag = ev.get('subagent_id') or ev.get('trajectory_id') or 'sub'
+                    actor = click.style("ROOT AGENT", fg="magenta", bold=True) if ev.get("is_main") else click.style(f"SUBAGENT ({str(sub_tag)[:8]})", fg="cyan", bold=True)
                     direction_arrow = ">>" if ev.get("direction") == "TO_HARNESS" else "<<"
                     stype = click.style(f"{ev.get('step_type'):<16}", fg="yellow", bold=True)
 
@@ -204,9 +213,11 @@ def inspect_cmd(session_id: str, step: Optional[int], out_json: bool, out_yaml: 
         click.echo(f"Subagents:    {sess_info.get('subagent_count')}")
         click.echo(f"Total Events: {len(events)}")
         click.echo("─" * 80)
+        from agy_watch.formatters import format_locale_time
         for ev in events:
-            ts = time.strftime("%H:%M:%S", time.localtime(ev.get("timestamp", 0)))
-            actor = "ROOT AGENT" if ev.get("is_main") else f"SUBAGENT ({ev.get('subagent_id')})"
+            ts = format_locale_time(ev.get("timestamp", 0))
+            sub_tag = ev.get('subagent_id') or ev.get('trajectory_id') or 'sub'
+            actor = "ROOT AGENT" if ev.get("is_main") else f"SUBAGENT ({str(sub_tag)[:8]})"
             click.echo(f"[{ts}] Step {ev.get('step_index') or ev.get('id')} | {actor} | {ev.get('step_type')}")
             if ev.get("prompt"):
                 click.echo(f"  Prompt: {ev['prompt']}")

@@ -122,6 +122,10 @@ class SessionWatcher:
                         except Exception:
                             self.pending_pretool_args[tool_name] = args_json
 
+            sub_id = traj_id if (not is_main and traj_id) else None
+            if sub_id:
+                self.session_info["subagents"].add(sub_id)
+
             event: Dict[str, Any] = {
                 "id": e_id,
                 "seq_num": seq,
@@ -140,11 +144,46 @@ class SessionWatcher:
                 "tool_id": None,
                 "tool_args": None,
                 "subagent_report": None,
-                "subagent_id": None,
+                "subagent_id": sub_id,
                 "tokens": None,
                 "artifacts": [],
                 "payload": payload,
             }
+
+            if "toolCall" in payload or "tool_call" in payload:
+                tc_obj = payload.get("toolCall") or payload.get("tool_call") or {}
+                event["step_type"] = "TOOL_CALL"
+                event["tool_name"] = tc_obj.get("name")
+                event["tool_id"] = tc_obj.get("id")
+                args_json = tc_obj.get("argumentsJson") or tc_obj.get("arguments_json")
+                if args_json:
+                    try:
+                        event["tool_args"] = json.loads(args_json)
+                    except Exception:
+                        event["tool_args"] = args_json
+                else:
+                    event["tool_args"] = tc_obj.get("arguments") or {}
+                event["artifacts"] = self._extract_event_artifacts(event)
+                new_events.append(event)
+                self.all_events.append(event)
+                continue
+
+            if "toolResponse" in payload or "tool_response" in payload:
+                tr_obj = payload.get("toolResponse") or payload.get("tool_response") or {}
+                event["step_type"] = "TOOL_RESPONSE"
+                event["tool_id"] = tr_obj.get("id")
+                resp_json = tr_obj.get("responseJson") or tr_obj.get("response_json")
+                event["text"] = resp_json or tr_obj.get("response") or ""
+                for prev_ev in reversed(self.all_events):
+                    if prev_ev.get("tool_id") == event["tool_id"]:
+                        if isinstance(prev_ev.get("payload"), dict):
+                            if "stepUpdate" not in prev_ev["payload"] or not isinstance(prev_ev["payload"]["stepUpdate"], dict):
+                                prev_ev["payload"]["stepUpdate"] = {}
+                            prev_ev["payload"]["stepUpdate"]["responseJson"] = resp_json
+                        break
+                new_events.append(event)
+                self.all_events.append(event)
+                continue
 
             if direction == "TO_HARNESS":
                 if msg_type == "USER_PROMPT":
@@ -197,6 +236,21 @@ class SessionWatcher:
                         ("edit_file", "edit_file"),
                         ("listDirectory", "list_directory"),
                         ("list_directory", "list_directory"),
+                        ("searchDirectory", "search_directory"),
+                        ("search_directory", "search_directory"),
+                        ("findFile", "find_file"),
+                        ("find_file", "find_file"),
+                        ("questionsRequest", "ask_question"),
+                        ("questions_request", "ask_question"),
+                        ("searchWeb", "search_web"),
+                        ("search_web", "search_web"),
+                        ("readUrlContent", "read_url_content"),
+                        ("read_url_content", "read_url_content"),
+                        ("finish", "finish"),
+                        ("customTool", "custom_tool"),
+                        ("custom_tool", "custom_tool"),
+                        ("mcpTool", "mcp_tool"),
+                        ("mcp_tool", "mcp_tool"),
                     ]:
                         if action_key in su:
                             action_detected = True
@@ -204,10 +258,14 @@ class SessionWatcher:
                             tc_ev["step_type"] = "TOOL_CALL"
                             tc_ev["tool_name"] = action_name
 
-                            # Correlate arguments: prefer pending PreTool hook args if available
-                            raw_args = su[action_key] or {}
-                            if not raw_args and action_name in self.pending_pretool_args:
-                                raw_args = self.pending_pretool_args[action_name]
+                            # Correlate arguments: merge pending PreTool hook args with action payload
+                            raw_args = dict(su[action_key]) if isinstance(su[action_key], dict) else {}
+                            if action_name in self.pending_pretool_args:
+                                pt_data = self.pending_pretool_args[action_name]
+                                if isinstance(pt_data, dict):
+                                    merged = dict(pt_data)
+                                    merged.update(raw_args)
+                                    raw_args = merged
                             tc_ev["tool_args"] = raw_args
 
                             if not is_main and traj_id:
@@ -253,69 +311,9 @@ class SessionWatcher:
 
     def _extract_event_artifacts(self, ev: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Resolves generated images, markdown files, and media files associated with an event."""
-        artifacts: List[Dict[str, Any]] = []
-        seen_paths: Set[str] = set()
-
-        def add_file_if_valid(p: str, kind: str = "file") -> None:
-            if not p:
-                return
-            clean_path = p.replace("file://", "").strip()
-            if not os.path.isabs(clean_path):
-                clean_path = os.path.abspath(os.path.join(self.workspace_dir, clean_path))
-
-            if clean_path in seen_paths:
-                return
-            seen_paths.add(clean_path)
-
-            exists = os.path.exists(clean_path)
-            size = os.path.getsize(clean_path) if exists else 0
-
-            ext = os.path.splitext(clean_path)[1].lower()
-            if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"):
-                kind = "image"
-            elif ext in (".mp4", ".mov", ".webm", ".mkv"):
-                kind = "video"
-            elif ext == ".md":
-                kind = "markdown"
-
-            artifacts.append({
-                "type": kind,
-                "path": clean_path,
-                "filename": os.path.basename(clean_path),
-                "size_bytes": size,
-                "exists": exists,
-            })
-
-        # 1. Check tool arguments for generateImage
-        tool_args = ev.get("tool_args") or {}
-        if ev.get("tool_name") in ("generate_image", "generateImage"):
-            img_name = tool_args.get("ImageName") or tool_args.get("imageName") or ""
-            search_patterns = [
-                os.path.join(self.workspace_dir, "brain", "**", f"*{img_name}*"),
-                os.path.join(self.workspace_dir, "**", f"*{img_name}*.jpg"),
-                os.path.join(self.workspace_dir, "**", f"*{img_name}*.png"),
-            ]
-            for pattern in search_patterns:
-                for match in glob.glob(pattern, recursive=True):
-                    if os.path.isfile(match):
-                        add_file_if_valid(match, "image")
-
-        # 2. Check editFile, createFile, viewFile arguments
-        for k in ("filePath", "filePath", "TargetFile", "targetFile", "AbsolutePath", "absolutePath"):
-            if k in tool_args:
-                add_file_if_valid(str(tool_args[k]))
-
-        # 3. Check for markdown image links in payload/text/prompt/thinking
-        content_strings = [
-            str(ev.get("text") or ""),
-            str(ev.get("prompt") or ""),
-            str(ev.get("thinking") or ""),
-            str(ev.get("payload") or ""),
-        ]
-        img_pattern = re.compile(r"!\[.*?\]\((file:///)?([^)]+)\)")
-        for c in content_strings:
-            for match in img_pattern.finditer(c):
-                matched_path = match.group(2)
-                add_file_if_valid(matched_path, "image")
-
-        return artifacts
+        from agy_watch.wire_tap import extract_event_artifacts
+        return extract_event_artifacts(
+            ev,
+            workspace_dir=self.workspace_dir,
+            session_id=self.session_info.get("session_id"),
+        )
