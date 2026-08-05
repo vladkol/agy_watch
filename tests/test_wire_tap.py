@@ -124,6 +124,7 @@ async def test_wire_tap_end_to_end_recording():
     """Executes a real Agent run with WireTap, verifying full bidirectional capture and session_meta."""
     temp_dir = tempfile.mkdtemp(prefix="agy_wiretap_e2e_")
     try:
+        install_wire_tap(temp_dir)
         task_prompt = "Print 'WireTap Verification Successful' and complete the task."
         response_text = await _agent_func(
             workspace_dir=temp_dir,
@@ -168,6 +169,7 @@ async def test_wire_tap_subagent_tool_visibility():
     """Executes a multi-subagent task and verifies that subagent internal tool calls are captured."""
     temp_dir = tempfile.mkdtemp(prefix="agy_wiretap_subagents_")
     try:
+        install_wire_tap(temp_dir)
         task_prompt = (
             "Use start_subagent to create 2 subagents. "
             "Instruct each subagent to run an echo command and report back."

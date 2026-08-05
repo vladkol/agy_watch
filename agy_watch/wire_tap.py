@@ -25,7 +25,7 @@ import json
 import hashlib
 import sqlite3
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("agy_watch.wire_tap")
 

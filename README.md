@@ -60,33 +60,64 @@ uv sync
 
 ---
 
-## Quickstart: Wire-Tapping Your Agent
+## Global CLI Installation (Optional)
 
-Adding observability to your Antigravity agent takes just **one line of code**:
-
-```python
-import asyncio
-from google.antigravity import Agent, LocalAgentConfig
-from agy_watch import install_wire_tap
-
-async def main():
-    # 1. Enable transparent wire-tapping (stores DB under ~/.antigravity/samples/agy_watch/workspaces)
-    install_wire_tap()
-
-    # 2. Run your agent normally
-    config = LocalAgentConfig()
-    async with Agent(config) as agent:
-        response = await agent.chat("Say 'Hello World from agy_watch!'")
-        print(await response.text())
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-While your agent runs (or anytime after it completes), open another terminal tab and launch the dashboard:
+You can install `agy_watch` globally using `uv tool` or `pipx`:
 
 ```bash
-agy_watch
+# Install globally via uv tool
+uv tool install git+https://github.com/vladkol/agy_watch.git
+
+# Or into an active virtual environment
+uv add git+https://github.com/vladkol/agy_watch.git
+```
+
+---
+
+## Zero-Code Wire-Tapping
+
+`agy_watch` offers flexible options to observe your agents without changing a single line of your agent code:
+
+### 1. In-Venv Auto-Observability (`agy_watch watch`) *(Recommended for Python)*
+
+Enable auto-observability on your active virtualenv with one command:
+
+```bash
+# Watch the current virtual environment
+agy_watch watch
+
+# Or watch a specific project directory
+agy_watch watch ./my_agent_project
+```
+
+From this moment forward, run your agents normally with plain `python`, `uv run`, `pytest`, or your IDE's Run/Debug button:
+```bash
+python my_agent.py
+```
+Every execution is automatically wire-tapped and indexed. To disable:
+```bash
+agy_watch unwatch
+```
+
+---
+
+### 2. Universal Non-Python & Standalone Agents (`proxy-path`)
+
+For agents written in **Node.js/TypeScript, Go, Rust, Java**, or standalone Python scripts:
+
+```bash
+# Run any agent through the universal harness proxy
+ANTIGRAVITY_HARNESS_PATH="$(agy_watch proxy-path)" ./my-non-python-agent
+```
+
+---
+
+### 3. On-Demand CLI Runner (`agy_watch run`)
+
+Run any Python agent script on-demand with automatic proxy wire-tapping:
+
+```bash
+agy_watch run my_agent.py --arg1 value
 ```
 
 ---
@@ -179,15 +210,9 @@ agy_watch inspect <session_id> --step 3 --json
 agy_watch attach <session_id>
 ```
 
----
+## Examples
 
-## Included Examples
-
-Explore the runnable examples in the [`examples/`](examples/) directory:
-
-* **[examples/getting_started/hello_world_wiretap.py](examples/getting_started/hello_world_wiretap.py)**: Minimal Antigravity SDK agent with wire-tapping enabled.
-* **[examples/image_generation/generate_image_agent.py](examples/image_generation/generate_image_agent.py)**: Agent generating visual image assets, immediately viewable in the TUI Artifacts tab.
-* **[examples/yolo_agent/main.py](examples/yolo_agent/main.py)**: Autonomous multi-agent runner orchestrating concurrent worker subagents.
+For pure Antigravity SDK demonstration scripts showcasing chat streaming, multimodal image artifacts, and recursive multi-subagent hierarchies, see the [`examples/`](examples/) directory and [`examples/README.md`](examples/README.md).
 
 ---
 

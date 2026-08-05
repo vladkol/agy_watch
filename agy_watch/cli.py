@@ -22,6 +22,8 @@ import os
 import sys
 import json
 import time
+import shutil
+import subprocess
 import click
 import yaml
 from typing import Any, Dict, List, Optional
@@ -215,6 +217,213 @@ def inspect_cmd(session_id: str, step: Optional[int], out_json: bool, out_yaml: 
             if ev.get("artifacts"):
                 for art in ev["artifacts"]:
                     click.echo(f"  Artifact: {art['filename']} ({art['type']}) -> {art['path']}")
+
+
+@main.command("watch")
+@click.argument("env_path", required=False, type=click.Path(exists=True, file_okay=False, dir_okay=True))
+def watch_cmd(env_path: Optional[str]) -> None:
+    """Install transparent .pth auto-hook into a Python virtual environment."""
+    site_packages = _resolve_site_packages(env_path)
+    if not site_packages or not os.path.isdir(site_packages):
+        click.echo(click.style(f"Error: Could not locate site-packages in '{env_path or sys.prefix}'.", fg="red"), err=True)
+        sys.exit(1)
+
+    pth_file = os.path.join(site_packages, "agy_watch_hook.pth")
+    try:
+        with open(pth_file, "w", encoding="utf-8") as f:
+            f.write("import agy_watch.auto_hook\n")
+    except Exception as e:
+        click.echo(click.style(f"Error writing hook to {pth_file}: {e}", fg="red"), err=True)
+        sys.exit(1)
+
+    # Register in watched_envs.json
+    envs = _load_watched_envs()
+    norm_path = os.path.abspath(site_packages)
+    if not any(e.get("site_packages") == norm_path for e in envs):
+        envs.append({
+            "site_packages": norm_path,
+            "pth_file": pth_file,
+            "created_at": time.time(),
+        })
+        _save_watched_envs(envs)
+
+    click.echo(click.style("✓ Successfully installed agy_watch auto-hook!", fg="green", bold=True))
+    click.echo(f"  Target:   {norm_path}")
+    click.echo(f"  Hook:     {pth_file}")
+    click.echo(click.style("\nAll Antigravity SDK agents in this environment will be automatically observed on run.", fg="cyan"))
+
+
+@main.command("unwatch")
+@click.argument("env_path", required=False, type=click.Path(exists=True, file_okay=False, dir_okay=True))
+@click.option("--all", "unwatch_all", is_flag=True, help="Remove auto-hooks from all registered environments.")
+def unwatch_cmd(env_path: Optional[str], unwatch_all: bool) -> None:
+    """Remove agy_watch auto-hook from Python virtual environment(s)."""
+    envs = _load_watched_envs()
+    remaining = []
+
+    if unwatch_all:
+        for e in envs:
+            pth = e.get("pth_file")
+            if pth and os.path.exists(pth):
+                try:
+                    os.remove(pth)
+                    click.echo(f"✓ Removed hook from {e.get('site_packages')}")
+                except Exception as err:
+                    click.echo(click.style(f"Warning: Failed to remove {pth}: {err}", fg="yellow"))
+        _save_watched_envs([])
+        click.echo(click.style("✓ Unwatched all registered environments.", fg="green"))
+        return
+
+    site_packages = _resolve_site_packages(env_path)
+    if not site_packages:
+        click.echo(click.style(f"Error: Could not locate site-packages in '{env_path or sys.prefix}'.", fg="red"), err=True)
+        sys.exit(1)
+
+    pth_file = os.path.join(site_packages, "agy_watch_hook.pth")
+    if os.path.exists(pth_file):
+        try:
+            os.remove(pth_file)
+            click.echo(click.style(f"✓ Successfully removed agy_watch auto-hook from {site_packages}", fg="green"))
+        except Exception as e:
+            click.echo(click.style(f"Error removing {pth_file}: {e}", fg="red"), err=True)
+            sys.exit(1)
+    else:
+        click.echo(click.style(f"No active agy_watch hook found in {site_packages}", fg="yellow"))
+
+    norm_path = os.path.abspath(site_packages)
+    for e in envs:
+        if e.get("site_packages") != norm_path:
+            remaining.append(e)
+    _save_watched_envs(remaining)
+
+
+@main.command("status")
+def status_cmd() -> None:
+    """Display active watched virtual environments and registry statistics."""
+    envs = _load_watched_envs()
+    registry = get_global_registry()
+    sessions = registry.list_sessions(limit=100)
+    live_count = sum(1 for s in sessions if s.get("is_live"))
+
+    click.echo(click.style("=== agy_watch Observability Status ===", bold=True, fg="cyan"))
+    click.echo(f"Global Registry:  {registry.db_path}")
+    click.echo(f"Total Sessions:   {len(sessions)} ({live_count} currently active)\n")
+
+    click.echo(click.style("Watched Python Environments (.pth Auto-Hook):", bold=True))
+    if not envs:
+        click.echo("  No environments currently watched. (Run 'agy_watch watch' to observe one)")
+    else:
+        for idx, e in enumerate(envs, 1):
+            pth = e.get("pth_file", "")
+            is_active = os.path.exists(pth)
+            status_badge = click.style("[ACTIVE]", fg="green", bold=True) if is_active else click.style("[MISSING]", fg="red")
+            created_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e.get("created_at", 0)))
+            click.echo(f"  {idx}. {status_badge} {e.get('site_packages')} (Added: {created_str})")
+
+    # Show proxy path
+    proxy_path = _get_proxy_executable_path()
+    click.echo(f"\nUniversal Proxy Executable:")
+    click.echo(f"  Path: {proxy_path}")
+    click.echo(f"  Usage: ANTIGRAVITY_HARNESS_PATH=\"$(agy_watch proxy-path)\" ./my-agent")
+
+
+@main.command("proxy-path")
+def proxy_path_cmd() -> None:
+    """Print ONLY the absolute path to the universal agy-harness-proxy binary."""
+    # Write only the path to stdout without extra formatting or newlines
+    path = _get_proxy_executable_path()
+    sys.stdout.write(path + "\n")
+    sys.stdout.flush()
+
+
+@main.command("run", context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
+@click.argument("script_path", required=True, type=click.Path(exists=True))
+@click.pass_context
+def run_cmd(ctx: click.Context, script_path: str) -> None:
+    """Run any Python agent script with transparent wire-tapping enabled."""
+    proxy_path = _get_proxy_executable_path()
+    extra_args = list(ctx.args)
+
+    env = os.environ.copy()
+    env["ANTIGRAVITY_HARNESS_PATH"] = proxy_path
+
+    cmd = [sys.executable, script_path] + extra_args
+    sys.exit(subprocess.call(cmd, env=env))
+
+
+def _resolve_site_packages(path: Optional[str] = None) -> Optional[str]:
+    """Resolves the site-packages directory from an environment or path."""
+    import glob
+
+    if path:
+        abs_path = os.path.abspath(path)
+        if abs_path.endswith("site-packages") and os.path.isdir(abs_path):
+            return abs_path
+
+        # Check inside .venv or venv
+        candidates = [
+            os.path.join(abs_path, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"),
+            os.path.join(abs_path, ".venv", "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"),
+            os.path.join(abs_path, "venv", "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"),
+        ]
+        for c in candidates:
+            if os.path.isdir(c):
+                return c
+
+        # Glob for any lib/python*/site-packages
+        glob_matches = glob.glob(os.path.join(abs_path, "**", "site-packages"), recursive=True)
+        if glob_matches:
+            return glob_matches[0]
+
+    # Fallback to current virtualenv
+    try:
+        import site
+        sp_list = site.getsitepackages()
+        if sp_list:
+            return sp_list[0]
+    except Exception:
+        pass
+
+    fallback = os.path.join(sys.prefix, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages")
+    if os.path.isdir(fallback):
+        return fallback
+    return None
+
+
+WATCHED_ENVS_PATH = os.path.expanduser("~/.antigravity/samples/agy_watch/watched_envs.json")
+
+
+def _load_watched_envs() -> List[Dict[str, Any]]:
+    if os.path.exists(WATCHED_ENVS_PATH):
+        try:
+            with open(WATCHED_ENVS_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def _save_watched_envs(envs: List[Dict[str, Any]]) -> None:
+    os.makedirs(os.path.dirname(WATCHED_ENVS_PATH), exist_ok=True)
+    with open(WATCHED_ENVS_PATH, "w", encoding="utf-8") as f:
+        json.dump(envs, f, indent=2)
+
+
+def _get_proxy_executable_path() -> str:
+    """Returns the absolute path to the agy-harness-proxy executable."""
+    # 1. Check if agy-harness-proxy is in PATH
+    if p := shutil.which("agy-harness-proxy"):
+        return os.path.abspath(p)
+
+    # 2. Check in current Python sys.prefix bin/
+    suffix = "bin/agy-harness-proxy.exe" if sys.platform == "win32" else "bin/agy-harness-proxy"
+    bin_cand = os.path.join(sys.prefix, suffix)
+    if os.path.isfile(bin_cand):
+        return os.path.abspath(bin_cand)
+
+    # 3. Fallback to proxy.py script
+    script_cand = os.path.join(os.path.dirname(__file__), "proxy.py")
+    return os.path.abspath(script_cand)
 
 
 if __name__ == "__main__":

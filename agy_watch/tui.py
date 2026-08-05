@@ -487,7 +487,10 @@ class AgyWatchApp(App):
         if not new_events and not session_info:
             return
 
-        tree = self.query_one("#steps-tree", Tree)
+        try:
+            tree = self.query_one("#steps-tree", Tree)
+        except Exception:
+            return
 
         for ev in new_events:
             # Update session-level artifacts

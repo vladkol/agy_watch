@@ -97,7 +97,26 @@ class TappedWebSocket:
         return msg
 ```
 
-### 3.2 Content-Addressable Storage (CAS `BlobStore`) ([wire_tap.py](../agy_watch/wire_tap.py))
+### 3.2 In-Venv Automatic Hook (`auto_hook.py` & `.pth`)
+
+When a developer runs `agy_watch watch [ENV_PATH]`:
+1. `agy_watch` resolves the target virtual environment's `site-packages/` directory.
+2. It writes `agy_watch_hook.pth` containing `import agy_watch.auto_hook`.
+3. During Python interpreter boot, Python's standard library `site` module imports `agy_watch.auto_hook`, which automatically calls `install_wire_tap()` in memory.
+4. **Agent source code and wheel binaries remain 100% untouched.**
+
+### 3.3 Universal Binary Proxy Shim (`proxy.py` & `ANTIGRAVITY_HARNESS_PATH`)
+
+For non-Python agents (Node.js/TypeScript, Go, Rust, Java) or standalone scripts:
+1. When `ANTIGRAVITY_HARNESS_PATH="$(agy_watch proxy-path)"` is set, the calling agent process spawns `agy-harness-proxy` instead of the raw `localharness`.
+2. The proxy:
+   - Forwards `InputConfig` from `stdin` to the real `localharness` child process.
+   - Intercepts `OutputConfig(port=P, api_key=K)` from child `stdout`.
+   - Starts an ephemeral WebSocket proxy on OS port $P'$.
+   - Emits rewritten `OutputConfig(port=P', api_key=K)` to the calling agent's `stdout`.
+   - Proxies WebSocket frames bidirectionally, recording messages to `wire_tap.db` and registering the session in `registry.db`.
+
+### 3.4 Content-Addressable Storage (CAS `BlobStore`) ([wire_tap.py](../agy_watch/wire_tap.py))
 
 To keep database queries fast and responsive, string or binary payloads exceeding `threshold_bytes` (default: 64 KB) are saved to disk under `<save_dir>/.trajectories/blobs/<sha256[:2]>/<sha256>.<ext>`, replaced with a reference pointer:
 
@@ -112,7 +131,7 @@ To keep database queries fast and responsive, string or binary payloads exceedin
 }
 ```
 
-### 3.3 Zero-Lock SQLite WAL Architecture ([wire_tap.py](../agy_watch/wire_tap.py))
+### 3.5 Zero-Lock SQLite WAL Architecture ([wire_tap.py](../agy_watch/wire_tap.py))
 
 * **WAL Mode**: Databases are initialized with `PRAGMA journal_mode=WAL;` and `PRAGMA synchronous=NORMAL;`.
 * **Reader Concurrency**: `SessionWatcher` opens connections in read-only mode with a 5.0-second busy timeout. Multiple CLI instances can tail the exact same session simultaneously without blocking the active agent writer.
@@ -120,7 +139,7 @@ To keep database queries fast and responsive, string or binary payloads exceedin
   * `wire_events`: Immutable, append-only log of raw WebSocket frames (`seq_num`, `timestamp`, `direction`, `message_type`, `trajectory_id`, `step_index`, `is_main`, `payload_json`).
   * `session_meta`: Aggregated summary statistics updated atomically on every turn (`session_id`, `status`, `total_tokens`, `prompt_tokens`, `candidates_tokens`, `thoughts_tokens`, `cached_tokens`, `subagent_count`, `step_count`, `updated_at`).
 
-### 3.4 Hook Correlation & Role Classification ([watcher.py](../agy_watch/watcher.py))
+### 3.6 Hook Correlation & Role Classification ([watcher.py](../agy_watch/watcher.py))
 
 #### The Role of PreTool Hooks
 When the agent executes tools:

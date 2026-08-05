@@ -3,8 +3,6 @@ import logging
 from google.antigravity import Agent, LocalAgentConfig, CapabilitiesConfig, types
 from google.antigravity.hooks import policy
 
-from agy_watch import install_wire_tap
-
 logger = logging.getLogger("examples.yolo_agent")
 
 
@@ -19,7 +17,7 @@ async def _agent_func(
     api_key: str | None = None,
     **kwargs,
 ):
-    """Runs the Antigravity SDK YOLO Agent on the given task prompt with live agy_watch wire-tapping."""
+    """Runs the Antigravity SDK YOLO Agent on the given task prompt."""
     if not task_prompt:
         logger.error("No task prompt provided.")
         return
@@ -28,13 +26,11 @@ async def _agent_func(
     app_mode = os.environ.get("APP_MODE", "local")
     user_id = os.environ.get("DEV_USER_ID", "test_engineer")
 
-    # Ensure workspace directory exists and configure save_dir for trajectory DB recording
+    # Ensure workspace directory exists
     if workspace_dir:
         workspace_dir = os.path.abspath(workspace_dir)
         save_dir = os.path.join(workspace_dir, ".trajectories")
         os.makedirs(save_dir, exist_ok=True)
-        # Enable transparent wire-tapping for agy_watch
-        install_wire_tap(workspace_dir)
     else:
         save_dir = None
 
