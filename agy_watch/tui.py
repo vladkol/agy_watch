@@ -763,6 +763,10 @@ class AgyWatchApp(App):
         if step_type == "USER_INPUT":
             t.append(" USER_PROMPT: ", style="bold green")
             t.append(f"{(ev.get('prompt') or '')[:35]}...", style="green")
+        elif step_type == "USER_ANSWER":
+            t.append(" 💬 USER_ANSWER: ", style="bold bright_green")
+            ans_str = ev.get('text') or ev.get('prompt') or ""
+            t.append(f'"{ans_str[:40]}"', style="bright_green")
         elif step_type == "SUBAGENT_PROMPT":
             t.append(" SUBAGENT_PROMPT: ", style="bold green")
             t.append(f"{(ev.get('prompt') or '')[:35]}...", style="green")

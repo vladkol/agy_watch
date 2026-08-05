@@ -197,6 +197,62 @@ class SessionWatcher:
                         event["prompt"] = " ".join(text_parts)
                     else:
                         event["prompt"] = payload.get("prompt") or payload.get("content")
+                elif msg_type == "USER_ANSWER" or "questionResponse" in payload or "question_response" in payload:
+                    event["step_type"] = "USER_ANSWER"
+                    qr = payload.get("questionResponse") or payload.get("question_response") or {}
+                    resp_obj = qr.get("response") or {}
+                    answers = resp_obj.get("answers") or []
+
+                    target_step_idx = qr.get("stepIndex") if "stepIndex" in qr else qr.get("step_index")
+                    target_traj_id = qr.get("trajectoryId") or qr.get("trajectory_id")
+
+                    matching_q_event = None
+                    if target_step_idx is not None:
+                        for prev_ev in reversed(self.all_events):
+                            if prev_ev.get("tool_name") in ("ask_question", "askQuestion", "questionsRequest") and prev_ev.get("step_index") == target_step_idx:
+                                if prev_ev.get("trajectory_id") == target_traj_id or not target_traj_id:
+                                    matching_q_event = prev_ev
+                                    break
+
+                    answer_summaries = []
+                    for ans in answers:
+                        if isinstance(ans, dict):
+                            if "multipleChoiceAnswer" in ans or "multiple_choice_answer" in ans:
+                                mca = ans.get("multipleChoiceAnswer") or ans.get("multiple_choice_answer") or {}
+                                indices = mca.get("selectedChoiceIndices") or mca.get("selected_choice_indices") or []
+                                choice_labels = []
+                                if matching_q_event:
+                                    from agy_watch.tool_renderers import _normalize_questions
+                                    p_args = matching_q_event.get("tool_args") or {}
+                                    p_su = matching_q_event.get("payload", {}).get("stepUpdate", {})
+                                    norm_qs = _normalize_questions(p_args, p_su)
+                                    if norm_qs and norm_qs[0].get("options"):
+                                        opts = norm_qs[0]["options"]
+                                        for idx in indices:
+                                            if 0 <= idx < len(opts):
+                                                choice_labels.append(opts[idx])
+                                if choice_labels:
+                                    answer_summaries.append(", ".join(choice_labels))
+                                else:
+                                    answer_summaries.append(f"Option indices {indices}")
+                            elif "textAnswer" in ans or "text_answer" in ans:
+                                ta = ans.get("textAnswer") or ans.get("text_answer")
+                                answer_summaries.append(str(ta))
+                            elif "openEndedAnswer" in ans or "open_ended_answer" in ans:
+                                oea = ans.get("openEndedAnswer") or ans.get("open_ended_answer")
+                                answer_summaries.append(str(oea))
+
+                    answer_text = " | ".join(answer_summaries) if answer_summaries else "User response submitted"
+                    event["text"] = answer_text
+                    event["prompt"] = answer_text
+                    event["response"] = resp_obj
+
+                    # Correlate response back onto matching ask_question event
+                    if matching_q_event:
+                        if not isinstance(matching_q_event.get("tool_args"), dict):
+                            matching_q_event["tool_args"] = {}
+                        matching_q_event["tool_args"]["response"] = resp_obj
+                        matching_q_event["user_answer"] = resp_obj
             else:
                 su = payload.get("stepUpdate") or payload.get("step_update") or {}
                 if su:

@@ -176,6 +176,9 @@ class WireTapDB:
         seq = payload.get("seqNum") or payload.get("seq_num")
 
         msg_type = "OUTBOUND"
+        traj_id = self.session_id
+        step_idx = None
+
         if "userInput" in payload or "user_input" in payload or "complexUserInput" in payload:
             msg_type = "USER_PROMPT"
             if not self.user_title:
@@ -185,6 +188,13 @@ class WireTapDB:
                     prompt_text = " ".join([p.get("text", "") for p in parts if "text" in p])
                 if prompt_text:
                     self.user_title = prompt_text[:80].strip().replace("\n", " ")
+        elif "questionResponse" in payload or "question_response" in payload:
+            msg_type = "USER_ANSWER"
+            qr = payload.get("questionResponse") or payload.get("question_response") or {}
+            if qr.get("trajectoryId") or qr.get("trajectory_id"):
+                traj_id = qr.get("trajectoryId") or qr.get("trajectory_id")
+            if "stepIndex" in qr or "step_index" in qr:
+                step_idx = qr.get("stepIndex") if "stepIndex" in qr else qr.get("step_index")
 
         offloaded_payload = self.blob_store.maybe_offload(payload)
         payload_json = json.dumps(offloaded_payload)
@@ -194,7 +204,7 @@ class WireTapDB:
             conn.execute("""
             INSERT INTO wire_events (seq_num, timestamp, direction, message_type, trajectory_id, step_index, is_main, payload_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (seq, now, "TO_HARNESS", msg_type, self.session_id, None, 1, payload_json))
+            """, (seq, now, "TO_HARNESS", msg_type, traj_id, step_idx, 1, payload_json))
         conn.close()
 
         self._sync_session_meta()

@@ -139,6 +139,83 @@ def _extract_merged_args_and_result(ev: Dict[str, Any]) -> Tuple[Dict[str, Any],
     return tool_args, su
 
 
+def _normalize_questions(tool_args: Dict[str, Any], su: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Normalizes both flat Python args and protobuf questionsRequest wire structures into a standard list."""
+    raw_q = tool_args.get("questions") or su.get("questions")
+    if not raw_q and "questionsRequest" in su:
+        raw_q = su["questionsRequest"].get("questions")
+    if not raw_q and "questions_request" in su:
+        raw_q = su["questions_request"].get("questions")
+    if not raw_q and ("question" in tool_args or "multipleChoice" in tool_args or "multiple_choice" in tool_args):
+        raw_q = [tool_args]
+
+    normalized = []
+    if isinstance(raw_q, list):
+        for item in raw_q:
+            if not isinstance(item, dict):
+                continue
+            if "multipleChoice" in item or "multiple_choice" in item:
+                mc = item.get("multipleChoice") or item.get("multiple_choice") or {}
+                normalized.append({
+                    "question": mc.get("question", ""),
+                    "options": mc.get("choices") or mc.get("options") or [],
+                    "is_multi_select": mc.get("isMultiSelect", mc.get("is_multi_select", False)),
+                    "type": "multiple_choice",
+                })
+            elif "openEnded" in item or "open_ended" in item:
+                oe = item.get("openEnded") or item.get("open_ended") or {}
+                normalized.append({
+                    "question": oe.get("question", ""),
+                    "placeholder": oe.get("placeholder", ""),
+                    "options": [],
+                    "is_multi_select": False,
+                    "type": "open_ended",
+                })
+            elif "question" in item:
+                normalized.append({
+                    "question": item.get("question", ""),
+                    "options": item.get("options") or item.get("choices") or [],
+                    "is_multi_select": item.get("is_multi_select", item.get("isMultiSelect", False)),
+                    "type": "multiple_choice" if (item.get("options") or item.get("choices")) else "open_ended",
+                })
+    return normalized
+
+
+def _extract_user_answers(tool_args: Dict[str, Any], su: Dict[str, Any], ev: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extracts answered choices and strings from outbound/correlated question response payloads."""
+    answers = []
+    resp = (
+        tool_args.get("response")
+        or su.get("response")
+        or ev.get("user_answer")
+        or ev.get("response")
+        or {}
+    )
+    if isinstance(resp, dict):
+        raw_answers = resp.get("answers") or []
+        for ans in raw_answers:
+            if isinstance(ans, dict):
+                if "multipleChoiceAnswer" in ans or "multiple_choice_answer" in ans:
+                    mca = ans.get("multipleChoiceAnswer") or ans.get("multiple_choice_answer") or {}
+                    indices = mca.get("selectedChoiceIndices") or mca.get("selected_choice_indices") or []
+                    answers.append({"type": "indices", "indices": indices})
+                elif "textAnswer" in ans or "text_answer" in ans:
+                    ta = ans.get("textAnswer") or ans.get("text_answer")
+                    answers.append({"type": "text", "text": ta})
+                elif "openEndedAnswer" in ans or "open_ended_answer" in ans:
+                    oea = ans.get("openEndedAnswer") or ans.get("open_ended_answer")
+                    answers.append({"type": "text", "text": oea})
+
+    # Also check flat answers
+    flat_ans = su.get("answer") or su.get("selected_options") or su.get("selectedOptions") or tool_args.get("answer")
+    if flat_ans:
+        if isinstance(flat_ans, list):
+            answers.append({"type": "strings", "strings": [str(x) for x in flat_ans]})
+        else:
+            answers.append({"type": "strings", "strings": [str(flat_ans)], "text": str(flat_ans)})
+    return answers
+
+
 def build_tool_tree_label(ev: Dict[str, Any]) -> Text:
     """Builds a concise, informative label for tree and flat timeline nodes."""
     tool_name = ev.get("tool_name") or "tool"
@@ -163,7 +240,6 @@ def build_tool_tree_label(ev: Dict[str, Any]) -> Text:
         server = tool_args.get("serverName") or tool_args.get("server_name") or tool_args.get("ServerName") or "mcp"
         sub_tool = tool_args.get("toolName") or tool_args.get("tool_name") or tool_args.get("ToolName") or "tool"
         t.append(f"MCP [{server}:{sub_tool}]", style="bold blue")
-        # Extract first arg summary
         msg = tool_args.get("message") or tool_args.get("query") or ""
         if msg:
             t.append(f' ("{str(msg)[:25]}")', style="italic bright_cyan")
@@ -223,10 +299,10 @@ def build_tool_tree_label(ev: Dict[str, Any]) -> Text:
         url = tool_args.get("url") or tool_args.get("Url") or ""
         if url:
             t.append(f" ({url[:30]})", style="italic bright_blue")
-    elif tool_name in ("ask_question", "askQuestion", "questionsRequest"):
+    elif tool_name in ("ask_question", "askQuestion", "questionsRequest", "questions_request"):
+        questions = _normalize_questions(tool_args, su)
+        q = questions[0].get("question", "") if questions else ""
         t.append("TOOL: ask_question", style="bold yellow")
-        questions = tool_args.get("questions") or ([tool_args] if "question" in tool_args else [])
-        q = questions[0].get("question", "") if questions and isinstance(questions[0], dict) else ""
         if q:
             t.append(f' ("{q[:30]}...")', style="italic bright_green")
     else:
@@ -614,32 +690,58 @@ def render_invoke_subagent(ev: Dict[str, Any]) -> RenderableType:
 
 
 def render_ask_question(ev: Dict[str, Any]) -> RenderableType:
-    """Renders interactive Q&A cards with option lists and selected choice indicators."""
+    """Renders interactive Q&A cards with option lists, answer badges, and active state indicators."""
     args, su = _extract_merged_args_and_result(ev)
-
-    questions = args.get("questions")
-    if not questions and "question" in args:
-        questions = [args]
+    questions = _normalize_questions(args, su)
+    user_answers = _extract_user_answers(args, su, ev)
+    state = ev.get("state") or su.get("state") or "STATE_ACTIVE"
 
     items: List[RenderableType] = []
-    selected_answer = su.get("answer") or su.get("selected_options") or su.get("selectedOptions") or []
 
-    if isinstance(questions, list):
-        for q_obj in questions:
-            if isinstance(q_obj, dict):
-                q_text = q_obj.get("question", "")
-                options = q_obj.get("options", [])
-                multi = q_obj.get("is_multi_select", q_obj.get("isMultiSelect", False))
+    # 1. Active Waiting Status
+    if state == "STATE_WAITING_FOR_USER" and not user_answers:
+        waiting_banner = Text()
+        waiting_banner.append("⏳ WAITING FOR USER INPUT / SELECTION\n", style="bold yellow")
+        waiting_banner.append("Execution is paused awaiting your response in the console/client.\n", style="italic bright_yellow")
+        items.append(Panel(waiting_banner, border_style="yellow"))
+        items.append(Text(""))
 
-                items.append(Text(f"❓ {q_text}\n", style="bold bright_green"))
-                items.append(Text(f"Mode: {'Multiple Choice (Checkboxes)' if multi else 'Single Selection'}\n", style="dim"))
+    if not questions:
+        req_text = su.get("requestText") or args.get("requestText") or "Interactive Question"
+        items.append(Text(f"❓ {req_text}\n", style="bold bright_green"))
+    else:
+        for idx, q_obj in enumerate(questions):
+            q_text = q_obj.get("question", "")
+            options = q_obj.get("options", [])
+            multi = q_obj.get("is_multi_select", False)
 
-                for opt in options:
-                    is_selected = (opt in selected_answer) if isinstance(selected_answer, list) else (opt == selected_answer)
+            selected_indices = set()
+            selected_strings = set()
+            write_in_text = None
+
+            if idx < len(user_answers):
+                ans = user_answers[idx]
+                if ans["type"] == "indices":
+                    selected_indices = set(ans.get("indices", []))
+                elif ans["type"] == "strings":
+                    selected_strings = set(ans.get("strings", []))
+                elif ans["type"] == "text":
+                    write_in_text = ans.get("text")
+
+            items.append(Text(f"❓ {q_text}\n", style="bold bright_green"))
+            mode_str = "Multiple Choice (Checkboxes)" if multi else "Single Selection"
+            items.append(Text(f"Mode: {mode_str}\n\n", style="dim"))
+
+            if options:
+                for opt_idx, opt in enumerate(options):
+                    is_selected = (opt_idx in selected_indices) or (opt in selected_strings)
                     badge = "[✓]" if is_selected else "[ ]"
                     style = "bold green" if is_selected else "white"
-                    suffix = "  ◄── SELECTED" if is_selected else ""
+                    suffix = "  ◄── SELECTED CHOICE" if is_selected else ""
                     items.append(Text(f"  {badge} {opt}{suffix}\n", style=style))
+
+            if write_in_text and (not options or write_in_text not in options):
+                items.append(Text(f"\n  ✍️ User Answer: \"{write_in_text}\"\n", style="bold bright_cyan"))
 
     return Panel(Group(*items), title="[bold green]USER QUESTION & INTERACTION[/bold green]", border_style="green")
 

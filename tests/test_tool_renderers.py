@@ -211,7 +211,8 @@ def test_invoke_subagent_rendering():
 
 
 def test_ask_question_rendering():
-    """Verifies ask_question option list with selected answer badge."""
+    """Verifies ask_question option list with selected answer badge in both flat and protobuf wire format."""
+    # 1. Flat schema with direct answer
     ev = {
         "tool_name": "ask_question",
         "tool_args": {
@@ -231,6 +232,67 @@ def test_ask_question_rendering():
     assert "Which backend to use?" in rendered
     assert "[✓] SQLite  ◄── SELECTED" in rendered
     assert "[ ] PostgreSQL" in rendered
+
+    # 2. Real protobuf wire format with multipleChoice and selectedChoiceIndices
+    ev_wire = {
+        "tool_name": "ask_question",
+        "step_index": 2,
+        "tool_args": {},
+        "payload": {
+            "stepUpdate": {
+                "state": "STATE_DONE",
+                "questionsRequest": {
+                    "questions": [
+                        {
+                            "multipleChoice": {
+                                "question": "What file or pattern are you searching for?",
+                                "choices": [
+                                    "Search in current workspace",
+                                    "Search for specific extension",
+                                    "Search in directory path",
+                                ],
+                                "isMultiSelect": False,
+                            }
+                        }
+                    ]
+                },
+                "response": {
+                    "answers": [
+                        {"multipleChoiceAnswer": {"selectedChoiceIndices": [1]}}
+                    ]
+                },
+            }
+        },
+        "state": "STATE_DONE",
+    }
+    rendered_wire = _render_to_string(render_tool_event(ev_wire))
+    assert "What file or pattern are you searching for?" in rendered_wire
+    assert "[ ] Search in current workspace" in rendered_wire
+    assert "[✓] Search for specific extension  ◄── SELECTED" in rendered_wire
+    assert "[ ] Search in directory path" in rendered_wire
+
+    # 3. Active waiting state banner
+    ev_waiting = {
+        "tool_name": "ask_question",
+        "state": "STATE_WAITING_FOR_USER",
+        "payload": {
+            "stepUpdate": {
+                "state": "STATE_WAITING_FOR_USER",
+                "questionsRequest": {
+                    "questions": [
+                        {
+                            "multipleChoice": {
+                                "question": "Confirm action?",
+                                "choices": ["Yes", "No"],
+                            }
+                        }
+                    ]
+                },
+            }
+        },
+    }
+    rendered_waiting = _render_to_string(render_tool_event(ev_waiting))
+    assert "WAITING FOR USER INPUT" in rendered_waiting
 
 
 def test_generate_image_metadata_card():
