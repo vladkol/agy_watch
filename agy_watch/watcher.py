@@ -155,8 +155,16 @@ class SessionWatcher:
             if "callHookRequest" in payload or "call_hook_request" in payload:
                 chr_obj = payload.get("callHookRequest") or payload.get("call_hook_request") or {}
                 req_id = chr_obj.get("requestId") or chr_obj.get("request_id")
-                
-                if "preToolArgs" in chr_obj or "pre_tool_args" in chr_obj:
+                h_name = chr_obj.get("name") or ""
+                h_type = chr_obj.get("type") or ""
+
+                if "OnSessionStart" in h_name or "ON_SESSION_START" in h_type:
+                    event["step_type"] = "ON_SESSION_START_HOOK"
+                    event["hook_args"] = {}
+                elif "OnSessionEnd" in h_name or "ON_SESSION_END" in h_type:
+                    event["step_type"] = "ON_SESSION_END_HOOK"
+                    event["hook_args"] = {}
+                elif "preToolArgs" in chr_obj or "pre_tool_args" in chr_obj:
                     pt_args = chr_obj.get("preToolArgs") or chr_obj.get("pre_tool_args") or {}
                     t_name = pt_args.get("toolName") or pt_args.get("tool_name")
                     args_json = pt_args.get("argumentsJson") or pt_args.get("arguments_json")
@@ -190,7 +198,7 @@ class SessionWatcher:
                     event["step_type"] = "ON_COMPACTION_HOOK"
                     event["hook_args"] = chr_obj.get("onCompactionArgs") or chr_obj.get("on_compaction_args") or {}
                 else:
-                    event["step_type"] = "PRE_TOOL_HOOK"
+                    event["step_type"] = f"HOOK_{h_name.upper()}" if h_name else "HOOK_REQUEST"
 
                 if req_id:
                     self.pending_hook_requests[req_id] = {
@@ -201,6 +209,42 @@ class SessionWatcher:
                         "tool_args": event.get("tool_args") or event.get("hook_args"),
                         "event": event,
                     }
+
+                if event["step_type"] == "ON_SESSION_END_HOOK" and hasattr(self, "pending_session_end") and self.pending_session_end:
+                    event["child_events"] = [self.pending_session_end, event]
+                    self.pending_session_end = None
+
+                new_events.append(event)
+                self.all_events.append(event)
+                continue
+
+            if "sessionEndRequest" in payload or "session_end_request" in payload:
+                event["step_type"] = "SESSION_END_REQUEST"
+                event["text"] = "Session termination requested by client"
+                self.pending_session_end = event
+                continue
+
+            if "sessionEndResponse" in payload or "session_end_response" in payload:
+                event["step_type"] = "SESSION_END_RESPONSE"
+                event["text"] = "Session termination acknowledged by harness"
+                for prev_ev in reversed(self.all_events):
+                    if prev_ev.get("step_type") == "ON_SESSION_END_HOOK":
+                        if "child_events" not in prev_ev:
+                            prev_ev["child_events"] = [prev_ev]
+                        prev_ev["child_events"].append(event)
+                        break
+                continue
+
+            if "config" in payload:
+                event["step_type"] = "CLIENT_CONFIG"
+                self.pending_client_config = event
+                continue
+
+            if ("initializeConversationResponse" in payload or "initialize_conversation_response" in payload) and ("stepUpdate" not in payload and "step_update" not in payload):
+                event["step_type"] = "CLIENT_CONFIG"
+                if hasattr(self, "pending_client_config") and self.pending_client_config:
+                    event["child_events"] = [self.pending_client_config, event]
+                    self.pending_client_config = None
                 new_events.append(event)
                 self.all_events.append(event)
                 continue

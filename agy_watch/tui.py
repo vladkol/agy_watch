@@ -854,6 +854,14 @@ class AgyWatchApp(App):
                     t.append(f' ("{reason[:35]}")', style="italic yellow")
             else:
                 t.append(f"✅ APPROVED: {tool_name}", style="green")
+        elif step_type == "ON_SESSION_START_HOOK":
+            t.append("🚀 SESSION_START", style="bold blue")
+        elif step_type == "ON_SESSION_END_HOOK":
+            t.append("🛑 SESSION_END", style="bold red")
+        elif step_type in ("SESSION_END_REQUEST", "SESSION_END_RESPONSE"):
+            t.append("🛑 SESSION_END", style="bold red")
+        elif step_type in ("CLIENT_CONFIG", "CONFIG_HANDSHAKE"):
+            t.append("⚙️ CLIENT_CONFIG", style="dim cyan")
         elif step_type == "PRE_TOOL_HOOK":
             tool_name = ev.get("tool_name") or "tool"
             t.append(f"⏳ PRE_TOOL: {tool_name} (evaluating...)", style="italic bright_black")

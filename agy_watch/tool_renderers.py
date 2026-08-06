@@ -1124,7 +1124,28 @@ def render_policy_event(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Re
             items.append(Text("✅ PRE-TURN DECIDE HOOK: TURN APPROVED\n", style="bold green"))
             return Panel(Group(*items), title="[bold green]PRE-TURN HOOK[/bold green]", border_style="green", expand=True, padding=(0, 1))
 
-    # 3. PostTurn & PostTool Inspect Hooks
+    # 3. Session Start & Session End Hooks
+    if step_type == "ON_SESSION_START_HOOK" or msg_type in ("CALL_HOOK_ONSESSIONSTART", "CALL_HOOK_REQUEST") and "OnSessionStart" in str(payload):
+        items = [Text("🚀 LIFECYCLE HOOK: ON_SESSION_START (SESSION INITIALIZATION)\n", style="bold blue")]
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan", width=18)
+        grid.add_column()
+        grid.add_row("Hook Name:", "[bold white]OnSessionStart[/bold white]")
+        grid.add_row("Hook Type:", "[bold blue]Session Initialization Observer[/bold blue]")
+        items.append(grid)
+        return Panel(Group(*items), title="[bold blue]SESSION LIFECYCLE: START[/bold blue]", border_style="blue", expand=True, padding=(0, 1))
+
+    if step_type in ("ON_SESSION_END_HOOK", "SESSION_END_REQUEST", "SESSION_END_RESPONSE") or "OnSessionEnd" in str(payload):
+        items = [Text("🛑 LIFECYCLE HOOK: ON_SESSION_END (SESSION TERMINATION)\n", style="bold red")]
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan", width=18)
+        grid.add_column()
+        grid.add_row("Hook Name:", "[bold white]OnSessionEnd[/bold white]")
+        grid.add_row("Hook Type:", "[bold red]Session Teardown Observer[/bold red]")
+        items.append(grid)
+        return Panel(Group(*items), title="[bold red]SESSION LIFECYCLE: END[/bold red]", border_style="red", expand=True, padding=(0, 1))
+
+    # 4. PostTurn & PostTool Inspect Hooks
     if step_type == "POST_TURN_HOOK" or msg_type == "CALL_HOOK_POSTTURN":
         items = [Text("ℹ️ LIFECYCLE HOOK: POST_TURN (INSPECT HOOK)\n", style="bold cyan")]
         return Panel(Group(*items), title="[bold cyan]INSPECT HOOK: POST_TURN[/bold cyan]", border_style="cyan", expand=True, padding=(0, 1))
@@ -1138,7 +1159,7 @@ def render_policy_event(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Re
         items = [Text("ℹ️ LIFECYCLE HOOK: ON_COMPACTION (INSPECT HOOK)\n", style="bold magenta")]
         return Panel(Group(*items), title="[bold magenta]INSPECT HOOK: ON_COMPACTION[/bold magenta]", border_style="magenta", expand=True, padding=(0, 1))
 
-    # 4. Standard PreTool Decide Hook
+    # 5. Standard PreTool Decide Hook
     pre_result = chr_resp.get("preToolResult") or chr_resp.get("pre_tool_result") or {}
     decision = ev.get("decision") or pre_result.get("decision")
     reason = ev.get("reason") or pre_result.get("reason") or ""
