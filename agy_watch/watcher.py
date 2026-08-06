@@ -51,6 +51,15 @@ class SessionWatcher:
             "step_count": 0,
         }
         self.all_events: List[Dict[str, Any]] = []
+        self.pending_hook_requests: Dict[str, Dict[str, Any]] = {}
+
+    @property
+    def session_id(self) -> Optional[str]:
+        return self.session_info.get("session_id")
+
+    @session_id.setter
+    def session_id(self, val: str) -> None:
+        self.session_info["session_id"] = val
 
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=5.0)
@@ -68,11 +77,12 @@ class SessionWatcher:
             conn = self._get_connection()
             cur = conn.cursor()
 
-            # 1. Update session metadata
+            # 1. Update session metadata (select canonical root session)
             cur.execute("""
             SELECT session_id, cascade_id, title, status, total_tokens, prompt_tokens,
                    candidates_tokens, thoughts_tokens, cached_tokens, subagent_count, step_count
-            FROM session_meta ORDER BY updated_at DESC LIMIT 1;
+            FROM session_meta
+            ORDER BY (session_id = cascade_id) DESC, updated_at ASC LIMIT 1;
             """)
             meta_row = cur.fetchone()
             if meta_row:
@@ -109,25 +119,9 @@ class SessionWatcher:
             except Exception:
                 payload = {}
 
-            # Buffer PreTool hook arguments and classify PRE_TOOL_HOOK event
-            if "callHookRequest" in payload or "call_hook_request" in payload:
-                chr_obj = payload.get("callHookRequest") or payload.get("call_hook_request") or {}
-                pt_args = chr_obj.get("preToolArgs") or chr_obj.get("pre_tool_args") or {}
-                t_name = pt_args.get("toolName") or pt_args.get("tool_name")
-                args_json = pt_args.get("argumentsJson") or pt_args.get("arguments_json")
-                parsed_args = {}
-                if t_name and args_json:
-                    try:
-                        parsed_args = json.loads(args_json)
-                    except Exception:
-                        parsed_args = {"raw": args_json}
-                    self.pending_pretool_args[t_name] = parsed_args
-                event["step_type"] = "PRE_TOOL_HOOK"
-                event["tool_name"] = t_name
-                event["tool_args"] = parsed_args
-                new_events.append(event)
-                self.all_events.append(event)
-                continue
+            # Infer subagent status from trajectory_id
+            if traj_id and self.session_id and traj_id != self.session_id:
+                is_main = 0
 
             sub_id = traj_id if (not is_main and traj_id) else None
             if sub_id:
@@ -157,6 +151,35 @@ class SessionWatcher:
                 "payload": payload,
             }
 
+            # Buffer PreTool hook arguments and classify PRE_TOOL_HOOK event
+            if "callHookRequest" in payload or "call_hook_request" in payload:
+                chr_obj = payload.get("callHookRequest") or payload.get("call_hook_request") or {}
+                req_id = chr_obj.get("requestId") or chr_obj.get("request_id")
+                pt_args = chr_obj.get("preToolArgs") or chr_obj.get("pre_tool_args") or {}
+                t_name = pt_args.get("toolName") or pt_args.get("tool_name")
+                args_json = pt_args.get("argumentsJson") or pt_args.get("arguments_json")
+                parsed_args = {}
+                if t_name and args_json:
+                    try:
+                        parsed_args = json.loads(args_json)
+                    except Exception:
+                        parsed_args = {"raw": args_json}
+                    self.pending_pretool_args[t_name] = parsed_args
+                event["step_type"] = "PRE_TOOL_HOOK"
+                event["tool_name"] = t_name
+                event["tool_args"] = parsed_args
+                if req_id:
+                    self.pending_hook_requests[req_id] = {
+                        "traj_id": traj_id,
+                        "is_main": event["is_main"],
+                        "subagent_id": sub_id,
+                        "tool_name": t_name,
+                        "tool_args": parsed_args,
+                    }
+                new_events.append(event)
+                self.all_events.append(event)
+                continue
+
             if "toolCall" in payload or "tool_call" in payload:
                 tc_obj = payload.get("toolCall") or payload.get("tool_call") or {}
                 event["step_type"] = "TOOL_CALL"
@@ -185,6 +208,9 @@ class SessionWatcher:
                     if prev_ev.get("tool_id") == event["tool_id"]:
                         event["tool_name"] = prev_ev.get("tool_name")
                         event["tool_args"] = prev_ev.get("tool_args")
+                        event["trajectory_id"] = prev_ev.get("trajectory_id")
+                        event["is_main"] = prev_ev.get("is_main", True)
+                        event["subagent_id"] = prev_ev.get("subagent_id")
                         if isinstance(prev_ev.get("payload"), dict):
                             if "stepUpdate" not in prev_ev["payload"] or not isinstance(prev_ev["payload"]["stepUpdate"], dict):
                                 prev_ev["payload"]["stepUpdate"] = {}
@@ -225,6 +251,7 @@ class SessionWatcher:
                 elif msg_type == "POLICY_DECISION" or "callHookResponse" in payload or "call_hook_response" in payload:
                     event["step_type"] = "POLICY_DECISION"
                     chr_resp = payload.get("callHookResponse") or payload.get("call_hook_response") or {}
+                    req_id = chr_resp.get("requestId") or chr_resp.get("request_id")
                     pre_res = chr_resp.get("preToolResult") or chr_resp.get("pre_tool_result") or {}
                     decision = pre_res.get("decision", "ALLOW")
                     reason = pre_res.get("reason", "")
@@ -233,15 +260,26 @@ class SessionWatcher:
                     if decision == "DENY":
                         event["state"] = "STATE_ERROR"
 
-                    for prev_ev in reversed(self.all_events):
-                        if prev_ev.get("step_type") == "PRE_TOOL_HOOK" or prev_ev.get("message_type") == "CALL_HOOK_PRETOOL":
-                            event["tool_name"] = prev_ev.get("tool_name")
-                            event["tool_args"] = prev_ev.get("tool_args")
-                            prev_ev["decision"] = decision
-                            prev_ev["reason"] = reason
-                            if decision == "DENY":
-                                prev_ev["state"] = "STATE_ERROR"
-                            break
+                    if req_id and req_id in self.pending_hook_requests:
+                        h_info = self.pending_hook_requests[req_id]
+                        event["trajectory_id"] = h_info["traj_id"]
+                        event["is_main"] = h_info["is_main"]
+                        event["subagent_id"] = h_info["subagent_id"]
+                        event["tool_name"] = h_info["tool_name"]
+                        event["tool_args"] = h_info["tool_args"]
+                    else:
+                        for prev_ev in reversed(self.all_events):
+                            if prev_ev.get("step_type") == "PRE_TOOL_HOOK" or prev_ev.get("message_type") == "CALL_HOOK_PRETOOL":
+                                event["tool_name"] = prev_ev.get("tool_name")
+                                event["tool_args"] = prev_ev.get("tool_args")
+                                event["trajectory_id"] = prev_ev.get("trajectory_id")
+                                event["is_main"] = prev_ev.get("is_main", True)
+                                event["subagent_id"] = prev_ev.get("subagent_id")
+                                prev_ev["decision"] = decision
+                                prev_ev["reason"] = reason
+                                if decision == "DENY":
+                                    prev_ev["state"] = "STATE_ERROR"
+                                break
                 elif msg_type == "USER_ANSWER" or "questionResponse" in payload or "question_response" in payload:
                     event["step_type"] = "USER_ANSWER"
                     qr = payload.get("questionResponse") or payload.get("question_response") or {}
@@ -372,6 +410,27 @@ class SessionWatcher:
                             if not is_main and traj_id:
                                 tc_ev["subagent_id"] = traj_id
                                 self.session_info["subagents"].add(traj_id)
+
+                                # Correlate back to preceding unmatched hook events
+                                curr_target = raw_args.get("TargetFile") or raw_args.get("filePath") or raw_args.get("target_file") or raw_args.get("targetFile") or raw_args.get("CommandLine") or raw_args.get("command") or raw_args.get("ImageName") or ""
+                                curr_norm_target = os.path.basename(str(curr_target).replace("file://", ""))
+
+                                FILE_TOOLS = {"create_file", "edit_file", "write_to_file", "view_file"}
+                                for prev in reversed(self.all_events):
+                                    if prev.get("step_type") in ("PRE_TOOL_HOOK", "POLICY_DECISION") and prev.get("is_main"):
+                                        p_args = prev.get("tool_args") or {}
+                                        p_target = p_args.get("TargetFile") or p_args.get("filePath") or p_args.get("target_file") or p_args.get("CommandLine") or p_args.get("ImageName") or ""
+                                        p_norm_target = os.path.basename(str(p_target).replace("file://", ""))
+
+                                        target_match = bool(curr_norm_target and p_norm_target and (curr_norm_target == p_norm_target))
+                                        p_tool = prev.get("tool_name") or ""
+                                        c_tool = tc_ev.get("tool_name") or ""
+                                        tool_match = (p_tool == c_tool) or (p_tool in FILE_TOOLS and c_tool in FILE_TOOLS)
+
+                                        if target_match or (tool_match and not p_norm_target and not curr_norm_target):
+                                            prev["is_main"] = False
+                                            prev["trajectory_id"] = traj_id
+                                            prev["subagent_id"] = traj_id
 
                             tc_ev["artifacts"] = self._extract_event_artifacts(tc_ev)
                             new_events.append(tc_ev)

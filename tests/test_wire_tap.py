@@ -199,3 +199,79 @@ async def test_wire_tap_subagent_tool_visibility():
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_subagent_hook_routing():
+    """Verifies that pre-tool hook requests and policy decision responses for subagents inherit the subagent trajectory ID."""
+    from agy_watch.watcher import SessionWatcher
+    temp_dir = tempfile.mkdtemp(prefix="agy_subagent_hook_test_")
+    try:
+        trajectories_dir = os.path.join(temp_dir, ".trajectories")
+        blobs_dir = os.path.join(trajectories_dir, "blobs")
+        db_path = os.path.join(trajectories_dir, "wire_tap.db")
+
+        store = BlobStore(blobs_dir=blobs_dir)
+        db = WireTapDB(db_path=db_path, blob_store=store)
+
+        # 0. Root agent initializes and starts
+        db.record_inbound({
+            "initializeConversationResponse": {"cascadeId": "root_session_123"},
+            "stepUpdate": {
+                "trajectoryId": "root_session_123",
+                "stepIndex": 0,
+                "text": "Root agent initializing",
+                "state": "STATE_ACTIVE",
+            }
+        })
+
+        # 1. Subagent step update arrives
+        sub_traj = "subagent_traj_abc"
+        db.record_inbound({
+            "stepUpdate": {
+                "trajectoryId": sub_traj,
+                "stepIndex": 1,
+                "text": "Subagent preparing to call tool",
+                "state": "STATE_ACTIVE",
+            }
+        })
+
+        # 2. Subagent hook request arrives from harness
+        db.record_inbound({
+            "callHookRequest": {
+                "requestId": "hook_req_999",
+                "name": "PreTool",
+                "type": "LIFECYCLE_HOOK_PRE_TOOL",
+                "preToolArgs": {
+                    "toolName": "generate_image",
+                    "argumentsJson": '{"ImageName": "bunny.png"}',
+                }
+            }
+        })
+
+        # 3. Subagent hook response sent outbound from Python SDK
+        db.record_outbound({
+            "callHookResponse": {
+                "requestId": "hook_req_999",
+                "preToolResult": {
+                    "decision": "ALLOW",
+                }
+            }
+        })
+
+        # Read via SessionWatcher
+        watcher = SessionWatcher(db_path=db_path)
+        info, events = watcher.poll()
+
+        hook_req_event = next(ev for ev in events if ev["step_type"] == "PRE_TOOL_HOOK")
+        assert hook_req_event["is_main"] is False
+        assert hook_req_event["subagent_id"] == sub_traj
+        assert hook_req_event["tool_name"] == "generate_image"
+
+        hook_resp_event = next(ev for ev in events if ev["step_type"] == "POLICY_DECISION")
+        assert hook_resp_event["is_main"] is False
+        assert hook_resp_event["subagent_id"] == sub_traj
+        assert hook_resp_event["decision"] == "ALLOW"
+        assert hook_resp_event["tool_name"] == "generate_image"
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)

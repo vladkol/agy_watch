@@ -126,6 +126,9 @@ class WireTapDB:
         self.candidates_tokens: int = 0
         self.thoughts_tokens: int = 0
         self.cached_tokens: int = 0
+        self.active_subagent_traj: Optional[str] = None
+        self.root_trajectory_id: Optional[str] = None
+        self.pending_hook_requests: Dict[str, Tuple[Optional[str], int, Optional[str]]] = {}
 
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
@@ -178,6 +181,7 @@ class WireTapDB:
         msg_type = "OUTBOUND"
         traj_id = self.session_id
         step_idx = None
+        is_main = 1
 
         if "userInput" in payload or "user_input" in payload or "complexUserInput" in payload:
             msg_type = "USER_PROMPT"
@@ -195,8 +199,18 @@ class WireTapDB:
                 traj_id = qr.get("trajectoryId") or qr.get("trajectory_id")
             if "stepIndex" in qr or "step_index" in qr:
                 step_idx = qr.get("stepIndex") if "stepIndex" in qr else qr.get("step_index")
+            if traj_id and self.session_id and traj_id != self.session_id:
+                is_main = 0
         elif "callHookResponse" in payload or "call_hook_response" in payload:
             msg_type = "POLICY_DECISION"
+            chr_resp = payload.get("callHookResponse") or payload.get("call_hook_response") or {}
+            req_id = chr_resp.get("requestId") or chr_resp.get("request_id")
+            if req_id and req_id in self.pending_hook_requests:
+                req_traj_id, req_is_main, _ = self.pending_hook_requests[req_id]
+                traj_id = req_traj_id
+                is_main = req_is_main
+            elif traj_id and self.session_id and traj_id != self.session_id:
+                is_main = 0
 
         offloaded_payload = self.blob_store.maybe_offload(payload)
         payload_json = json.dumps(offloaded_payload)
@@ -206,7 +220,7 @@ class WireTapDB:
             conn.execute("""
             INSERT INTO wire_events (seq_num, timestamp, direction, message_type, trajectory_id, step_index, is_main, payload_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (seq, now, "TO_HARNESS", msg_type, traj_id, step_idx, 1, payload_json))
+            """, (seq, now, "TO_HARNESS", msg_type, traj_id, step_idx, is_main, payload_json))
         conn.close()
 
         self._sync_session_meta()
@@ -229,6 +243,16 @@ class WireTapDB:
                 self.session_id = self.cascade_id
         elif "callHookRequest" in payload or "call_hook_request" in payload:
             msg_type = "CALL_HOOK_PRETOOL"
+            chr_obj = payload.get("callHookRequest") or payload.get("call_hook_request") or {}
+            req_id = chr_obj.get("requestId") or chr_obj.get("request_id")
+            pt_args = chr_obj.get("preToolArgs") or chr_obj.get("pre_tool_args") or {}
+            t_name = pt_args.get("toolName") or pt_args.get("tool_name")
+            if self.active_subagent_traj:
+                traj_id = self.active_subagent_traj
+            if traj_id and self.session_id and traj_id != self.session_id:
+                is_main = 0
+            if req_id:
+                self.pending_hook_requests[req_id] = (traj_id or self.session_id, is_main, t_name)
         elif "callHookResponse" in payload or "call_hook_response" in payload:
             msg_type = "CALL_HOOK_RESPONSE"
         elif "trajectoryStateUpdate" in payload or "trajectory_state_update" in payload:
@@ -242,14 +266,18 @@ class WireTapDB:
             step_idx = su.get("stepIndex") if "stepIndex" in su else su.get("step_index")
             state = su.get("state")
             if traj_id:
-                if not self.session_id or self.session_id == self.cascade_id:
+                if not self.root_trajectory_id:
+                    self.root_trajectory_id = traj_id
                     self.session_id = traj_id
-
-                if traj_id != self.session_id:
-                    is_main = 0
-                    self.subagents.add(traj_id)
-                else:
                     is_main = 1
+                    self.active_subagent_traj = None
+                elif traj_id == self.root_trajectory_id:
+                    is_main = 1
+                    self.active_subagent_traj = None
+                else:
+                    is_main = 0
+                    self.active_subagent_traj = traj_id
+                    self.subagents.add(traj_id)
 
             if is_main and state:
                 self.status = state
@@ -633,6 +661,9 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
                     except Exception:
                         pending_pretool_args[tool_name] = args_json
 
+        if traj_id and session_info.get("trajectory_id") and traj_id != session_info["trajectory_id"]:
+            is_main = 0
+
         event = {
             "id": row["id"],
             "seq_num": row["seq_num"],
@@ -772,6 +803,28 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
                         if not is_main and traj_id:
                             tc_ev["subagent_id"] = traj_id
                             subagents_set.add(traj_id)
+
+                            # Correlate back to preceding unmatched hook events
+                            curr_target = raw_args.get("TargetFile") or raw_args.get("filePath") or raw_args.get("target_file") or raw_args.get("targetFile") or raw_args.get("CommandLine") or raw_args.get("command") or raw_args.get("ImageName") or ""
+                            curr_norm_target = os.path.basename(str(curr_target).replace("file://", ""))
+
+                            FILE_TOOLS = {"create_file", "edit_file", "write_to_file", "view_file"}
+                            for prev in reversed(events):
+                                if prev.get("step_type") in ("PRE_TOOL_HOOK", "POLICY_DECISION") and prev.get("is_main"):
+                                    p_args = prev.get("tool_args") or {}
+                                    p_target = p_args.get("TargetFile") or p_args.get("filePath") or p_args.get("target_file") or p_args.get("CommandLine") or p_args.get("ImageName") or ""
+                                    p_norm_target = os.path.basename(str(p_target).replace("file://", ""))
+
+                                    target_match = bool(curr_norm_target and p_norm_target and (curr_norm_target == p_norm_target))
+                                    p_tool = prev.get("tool_name") or ""
+                                    c_tool = tc_ev.get("tool_name") or ""
+                                    tool_match = (p_tool == c_tool) or (p_tool in FILE_TOOLS and c_tool in FILE_TOOLS)
+
+                                    if target_match or (tool_match and not p_norm_target and not curr_norm_target):
+                                        prev["is_main"] = False
+                                        prev["trajectory_id"] = traj_id
+                                        prev["subagent_id"] = traj_id
+
                         tc_ev["artifacts"] = extract_event_artifacts(tc_ev, workspace_dir=workspace_dir, session_id=session_info["trajectory_id"])
                         events.append(tc_ev)
                         break
