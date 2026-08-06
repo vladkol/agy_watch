@@ -1,4 +1,4 @@
-# agy_watch: System Architecture & Internals
+# agy_watch: Protocol & System Internals
 
 > [!IMPORTANT]
 > **Disclaimer**: `agy_watch` is a personal developer debugging and observability tool and is **NOT an official Google product or framework**. It is designed for testing, inspecting, and profiling autonomous agents built with [`google-antigravity==0.1.9`](https://pypi.org/project/google-antigravity/) and its bundled `localharness` binary.
@@ -8,77 +8,61 @@
 
 ---
 
-## 1. Architectural Problem & Motivation
+## 1. Antigravity Architecture & Communication Protocol
 
-The [Google Antigravity Python SDK](https://github.com/google-antigravity/antigravity-sdk-python) is designed for high-performance agent execution. It pairs a clean Python interface with a specialized Go daemon (`localharness`) running as a local subprocess. The Python SDK (`LocalConnectionStrategy`) coordinates with `localharness` over a private loopback WebSocket IPC channel (`ws://127.0.0.1:<ephemeral_port>`).
+The [Google Antigravity SDK](https://github.com/google-antigravity/antigravity-sdk-python) is structured as a high-performance, decoupled agent execution engine. It pairs a high-level SDK interface (Python, TypeScript, Go) with a specialized Go daemon (`localharness`) running as a local child process.
 
 ```text
-┌─────────────────────────┐          Private Loopback WS IPC           ┌──────────────────────────┐
-│ Google Antigravity SDK  │ ◄────────────────────────────────────────► │ localharness (Go Daemon) │
-│ (Python Process)        │          ws://127.0.0.1:<port>             │ (Models & Execution)     │
-└─────────────────────────┘                                            └──────────────────────────┘
+┌──────────────────────────────────────┐          Loopback WebSocket IPC          ┌──────────────────────────┐
+│ Antigravity SDK (e.g. Python Process)│ ◄──────────────────────────────────────► │ localharness (Go Daemon) │
+│ - Agent Orchestration               │          ws://127.0.0.1:<port>           │ - Model Reasoning        │
+│ - Tool Callbacks & MCP Transports    │          Protobuf / JSON Wire Frames     │ - Subagent Trajectories  │
+│ - Security Policy Callbacks          │                                          │ - Execution Sandboxes    │
+└──────────────────────────────────────┘                                          └──────────────────────────┘
 ```
 
-### Why Wire-Tapping?
+### 1.1 Boot Lifecycle & Handshake
 
-While this decoupled architecture makes the Antigravity SDK exceptionally fast and isolated, developers building complex, multi-agent hierarchies need deep visibility into the internal execution stream:
-
-1. **Observing Sub-Agent Lifecycles**: When agents orchestrate concurrent subagents, inspecting their internal thought loops and individual tool calls in real time accelerates development and debugging.
-2. **Recovering Correlated Tool Arguments**: In the raw streaming protocol, `stepUpdate` frames emit lightweight action stubs (e.g. `invokeSubagent: {}`), while the complete argument payloads (such as worker prompts and subagent role definitions) are transmitted in a preceding hook event (`CALL_HOOK_PRETOOL`). Correlating these events provides full visibility into tool dispatching.
-3. **Observing Custom Python & MCP Tools**: Agents invoke diverse tool mechanisms, from in-process Python callables to Model Context Protocol (MCP) servers. Intercepting both the outbound dispatch and inbound return responses exposes full tool execution traces.
-4. **Stream Deduplication**: Streaming LLMs emit frequent token deltas (`textDelta`, `thinkingDelta`). Deduplicating these deltas into coherent logical steps creates clean, readable execution timelines.
-5. **Managing Multimodal Artifacts**: Modern agents frequently produce images, videos, and large tool outputs. Offloading payloads exceeding 64 KB to content-addressable storage keeps database operations instantaneous and lightweight.
-
-`agy_watch` solves these challenges by non-intrusively wrapping the WebSocket connection, indexing events in SQLite WAL mode, and presenting a rich terminal user interface.
+When an Antigravity agent starts:
+1. **Daemon Spawning**: The SDK starts the `localharness` binary as a child subprocess, passing an `InputConfig` payload via `stdin`.
+2. **Port Allocation**: `localharness` binds an internal WebSocket server to an ephemeral loopback port (`127.0.0.1:<port>`) and generates an authentication token.
+3. **Handshake Discovery**: `localharness` writes an `OutputConfig` JSON line containing `{ "port": <port>, "apiKey": "<token>" }` to `stdout`.
+4. **IPC Connection**: The SDK reads `OutputConfig` from `stdout` and establishes a private WebSocket connection (`LocalConnectionStrategy._connect_websocket`) to `ws://127.0.0.1:<port>/`.
+5. **Turn Execution**: All subsequent agent turns, reasoning traces, tool dispatches, subagent lifecycles, and security hooks flow bidirectionally across this WebSocket stream.
 
 ---
 
-## 2. End-to-End System Architecture
+## 2. Zero-Code Interception Architecture
+
+`agy_watch` captures the complete conversation stream without requiring changes to agent code through two complementary mechanisms:
 
 ```text
-┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ AGENT PROCESS (Python)                                                                                 │
-│                                                                                                        │
-│   from agy_watch import install_wire_tap                                                               │
-│   install_wire_tap("./workspace")                                                                      │
-│          │                                                                                             │
-│          ▼ Monkey-patches LocalConnectionStrategy._connect_websocket                                   │
-│   ┌────────────────────────────────────────────────────────────────────────────────────────────────┐   │
-│   │ TappedWebSocket Wrapper                                                                        │   │
-│   │                                                                                                │   │
-│   │   send(data) ──► JSON Parse ──► [CAS BlobStore Offload] ──► WireTapDB.record_outbound()       │   │
-│   │   recv()     ──► JSON Parse ──► [CAS BlobStore Offload] ──► WireTapDB.record_inbound()        │   │
-│   └────────────────────────────────────────────────────────────────────────────────────────────────┘   │
-│          │                                                                │                            │
-│          ▼ (Writes WAL SQLite)                                            ▼ (Registers Session)        │
-│   ┌──────────────────────────────────────────────┐                 ┌───────────────────────────────┐   │
-│   │ Workspace DB:                                │                 │ Host-Wide Machine Registry:   │   │
-│   │ <workspace>/.trajectories/wire_tap.db        │                 │ ~/.antigravity/samples/       │   │
-│   │ ├── wire_events (Append-only event log)      │                 │ agy_watch/registry.db         │   │
-│   │ ├── session_meta (Aggregated session stats)  │                 │ └── global_sessions           │   │
-│   │ └── blobs/ (CAS SHA-256 binary storage)      │                 │     (PID, Status, Tokens)     │   │
-│   └──────────────────────────────────────────────┘                 └───────────────────────────────┘   │
-└───────────────────────────────────────────────────────────────────────────────────▲────────────────────┘
-                                                                                    │
-┌───────────────────────────────────────────────────────────────────────────────────┼────────────────────┐
-│ OBSERVABILITY PROCESS (agy_watch CLI / TUI)                                       │                    │
-│                                                                                   │                    │
-│   ┌───────────────────────┐         ┌──────────────────────────────┐       ┌──────┴────────────────┐   │
-│   │ GlobalRegistry Reader │ ◄────── │ SessionWatcher (WAL Cursor)  │ ◄──── │ AgyWatchApp (Textual) │   │
-│   │ (Reads active PIDs)   │         │ (Incremental seq > last_seq) │       │ (3-Pane Dashboard)    │   │
-│   └───────────────────────┘         └──────────────────────────────┘       └───────────────────────┘   │
-└────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                                        ┌────────────────────────────────────────────────────────┐
+                                        │ AGENT RUNTIME                                          │
+                                        │                                                        │
+┌───────────────────────────┐           │   [Python In-Memory Hook]  OR  [Universal Proxy Shim]  │
+│ agy_watch watch (In-Venv) │ ────────► │   auto_hook.pth                ANTIGRAVITY_HARNESS_PATH│
+└───────────────────────────┘           │             │                             │            │
+                                        │             ▼                             ▼            │
+                                        │   ┌────────────────────────────────────────────────┐   │
+                                        │   │ Bidirectional Frame Interception               │   │
+                                        │   │ - Parse JSON/Protobuf                          │   │
+                                        │   │ - Offload Blobs (>64 KB) to CAS Storage        │   │
+                                        │   │ - Append-Only Write to wire_tap.db (WAL Mode)  │   │
+                                        │   └────────────────────────────────────────────────┘   │
+                                        └───────────────────────────┬────────────────────────────┘
+                                                                    │
+                                                                    ▼
+                                        ┌────────────────────────────────────────────────────────┐
+                                        │ PERSISTENT DATA LAYER                                  │
+                                        │ <workspace>/.trajectories/                             │
+                                        │ ├── wire_tap.db (wire_events, session_meta)            │
+                                        │ └── blobs/<sha256[:2]>/<sha256>.<ext>                  │
+                                        └────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 3. Core Subsystems Deep Dive
-
-### 3.1 Transparent WebSocket Interception ([`wire_tap.py`](../agy_watch/wire_tap.py))
-
-The `install_wire_tap(save_dir=None)` function dynamically hooks `google.antigravity.connections.local.local_connection.LocalConnectionStrategy._connect_websocket`.
-
-When the Python SDK establishes its connection to `localharness`, the original `WebSocketClientProtocol` is wrapped inside a [`TappedWebSocket`](../agy_watch/wire_tap.py):
+### 2.1 In-Memory Python Hook (`install_wire_tap`)
+For Python environments, `agy_watch` dynamically wraps `LocalConnectionStrategy._connect_websocket`. When the SDK establishes its WebSocket connection, the underlying `WebSocketClientProtocol` is transparently wrapped in a `TappedWebSocket`:
 
 ```python
 class TappedWebSocket:
@@ -98,28 +82,113 @@ class TappedWebSocket:
         return msg
 ```
 
-### 3.2 In-Venv Automatic Hook (`auto_hook.py` & `.pth`)
+When enabled via `agy_watch watch`, a `.pth` file (`agy_watch_hook.pth`) is placed into the virtual environment's `site-packages/`. During Python startup, the standard library `site` module imports `agy_watch.auto_hook`, activating the wire-tap automatically.
 
-When a developer runs `agy_watch watch [ENV_PATH]`:
-1. `agy_watch` resolves the target virtual environment's `site-packages/` directory.
-2. It writes `agy_watch_hook.pth` containing `import agy_watch.auto_hook`.
-3. During Python interpreter boot, Python's standard library `site` module imports `agy_watch.auto_hook`, which automatically calls `install_wire_tap()` in memory.
-4. **Agent source code and wheel binaries remain 100% untouched.**
+### 2.2 Universal Multi-Language Proxy (`agy-harness-proxy`)
+For agents written in Node.js/TypeScript, Go, Rust, or standalone binary workflows, setting `ANTIGRAVITY_HARNESS_PATH="$(agy_watch proxy-path)"` inserts an intermediate proxy process:
+1. The agent spawns `agy-harness-proxy` thinking it is `localharness`.
+2. The proxy launches the real `localharness` binary as a child process and relays `stdin` / `InputConfig`.
+3. It intercepts the real `OutputConfig(port=P, apiKey=K)` from the child's `stdout`.
+4. It starts an ephemeral WebSocket proxy server on port $P'$ and emits a rewritten `OutputConfig(port=P', apiKey=K)` to the parent agent.
+5. The proxy transparently forwards all frames bidirectionally while recording every frame to `wire_tap.db`.
 
-### 3.3 Universal Binary Proxy Shim (`proxy.py` & `ANTIGRAVITY_HARNESS_PATH`)
+---
 
-For non-Python agents (Node.js/TypeScript, Go, Rust, Java) or standalone scripts:
-1. When `ANTIGRAVITY_HARNESS_PATH="$(agy_watch proxy-path)"` is set, the calling agent process spawns `agy-harness-proxy` instead of the raw `localharness`.
-2. The proxy:
-   - Forwards `InputConfig` from `stdin` to the real `localharness` child process.
-   - Intercepts `OutputConfig(port=P, api_key=K)` from child `stdout`.
-   - Starts an ephemeral WebSocket proxy on OS port $P'$.
-   - Emits rewritten `OutputConfig(port=P', api_key=K)` to the calling agent's `stdout`.
-   - Proxies WebSocket frames bidirectionally, recording messages to `wire_tap.db` and registering the session in `registry.db`.
+## 3. Wire Protocol & Message Taxonomy
 
-### 3.4 Content-Addressable Storage (CAS `BlobStore`) ([`wire_tap.py`](../agy_watch/wire_tap.py))
+The communication between the SDK and `localharness` consists of structured JSON/protobuf frames categorized by direction and purpose:
 
-To keep database queries fast and responsive, string or binary payloads exceeding `threshold_bytes` (default: 64 KB) are saved to disk under `<save_dir>/.trajectories/blobs/<sha256[:2]>/<sha256>.<ext>`, replaced with a reference pointer:
+```text
+Direction       Message Type                 Payload Envelope / Key
+────────────────────────────────────────────────────────────────────────────────
+TO_HARNESS   │  USER_PROMPT               │  userInput, complexUserInput
+TO_HARNESS   │  USER_ANSWER               │  questionResponse
+TO_HARNESS   │  POLICY_DECISION           │  callHookResponse (preToolResult)
+TO_HARNESS   │  TOOL_RESPONSE             │  toolResponse (responseJson, errorMessage)
+─────────────┼────────────────────────────┼─────────────────────────────────────
+FROM_HARNESS │  INIT_CONVERSATION         │  initializeConversationResponse
+FROM_HARNESS │  STEP_UPDATE               │  stepUpdate (text, thinking, state)
+FROM_HARNESS │  CALL_HOOK_PRETOOL         │  callHookRequest (preToolArgs)
+FROM_HARNESS │  TOOL_CALL                 │  toolCall, stepUpdate.<actionKey>
+FROM_HARNESS │  TRAJECTORY_STATE_UPDATE   │  trajectoryStateUpdate
+FROM_HARNESS │  TELEMETRY                 │  usageMetadata (tokens)
+```
+
+### 3.1 Conversation Initialization
+- `initializeConversationResponse`: Emitted by `localharness` upon connection. Delivers the primary session identifier (`cascadeId`).
+
+### 3.2 Reasoning & Step Streaming
+- `stepUpdate`: Emitted iteratively during model generation.
+  - `trajectoryId`: Unique identifier for the execution thread (distinguishing the root agent from spawned subagents).
+  - `stepIndex`: Zero-based step counter within the trajectory.
+  - `source` & `target`: Identifies message origin (`SOURCE_MODEL`, `SOURCE_USER`, `TARGET_ENVIRONMENT`).
+  - `textDelta` & `thinkingDelta`: Incremental streaming chunks for model reasoning and final response text.
+  - `state`: Trajectory lifecycle state (`STATE_ACTIVE`, `STATE_DONE`, `STATE_ERROR`).
+
+### 3.3 Lifecycle Hooks & Security Policy
+- `callHookRequest` (`PreTool`): Emitted by the harness before executing any tool. Contains `requestId`, `toolName`, and serialized `argumentsJson`.
+- `callHookResponse`: Sent by the SDK back to the harness with the policy decision:
+  - `decision`: `"ALLOW"` or `"DENY"`.
+  - `reason`: Optional explanation string for policy denials.
+
+### 3.4 Tool Actions & Execution
+- In-process tools and MCP servers receive a `toolCall` frame containing `{ "id": "...", "name": "...", "argumentsJson": "..." }`.
+- Upon completion, the SDK returns a `toolResponse` frame containing `{ "id": "...", "responseJson": "...", "errorMessage": "..." }`.
+
+---
+
+## 4. Decoding, Correlation & Normalization
+
+Raw wire messages from `localharness` arrive as decoupled streaming events. `agy_watch` normalizes and correlates these events into a cohesive execution graph.
+
+### 4.1 Correlating Pre-Tool Hooks with Tool Calls
+In the streaming protocol, `stepUpdate` frames often deliver lightweight action stubs (e.g. `invokeSubagent: {}`), while the complete parameters (worker prompts, role titles, full target file paths) were transmitted in the preceding `callHookRequest`.
+
+`SessionWatcher` maintains a pending pre-tool argument buffer (`pending_pretool_args`). When the subsequent `TOOL_CALL` or `stepUpdate` action arrives, the parameters are merged to reconstruct the complete invocation context.
+
+### 4.2 Subagent Hierarchy & Two-Way Hook Correlation
+When an agent calls `invoke_subagent`, `localharness` instantiates child trajectories (e.g. `3ce168f3`, `cdc5e41e`):
+1. **Trajectory Disambiguation**: The first trajectory in a session is registered as the canonical Root Agent (`is_main = True`). Any event with a different `trajectoryId` is categorized as a Subagent (`is_main = False`).
+2. **Hook Trajectory Resolution**: `callHookRequest` and `callHookResponse` frames do not carry a top-level `trajectoryId` in their protobuf envelope. `agy_watch` resolves subagent ownership via two-way correlation:
+   - **Inbound Tracking**: When `callHookRequest` arrives during an active subagent turn, its `requestId` is mapped to the active subagent trajectory.
+   - **Outbound Inheritance**: When the SDK sends `callHookResponse`, it looks up `requestId` to inherit the subagent trajectory ID.
+   - **Target Back-Linking**: When a subagent executes a tool (`editFile`, `createFile`, `runCommand`), `SessionWatcher` inspects preceding unmatched hook events. If the target arguments (e.g. file path or tool name family) match, the hook events are retroactively attached to that subagent's execution branch.
+
+### 4.3 Action Key Normalization
+Antigravity tool definitions and wire protobuf actions use slightly different schemas depending on whether an action is evaluated at the SDK hook level or recorded in the harness trajectory:
+- `create_file` / `write_to_file` $\longleftrightarrow$ `createFile` / `editFile` (with `Overwrite: true`).
+- `run_command` $\longleftrightarrow$ `runCommand`.
+- `ask_question` $\longleftrightarrow$ `questionsRequest`.
+
+`agy_watch` normalizes these into unified tool families during event dispatching and artifact extraction.
+
+### 4.4 Error & Interception Classification
+`SessionWatcher` differentiates three distinct failure modes:
+1. **Security / Policy Denials**: `POLICY_DECISION` with `decision: "DENY"`. Surfaces the policy rule and rejection reason.
+2. **Tool Execution Exceptions**: `toolResponse` with `errorMessage`. Captures stderr or exception tracebacks from local tool runners.
+3. **Model Step Errors**: `stepUpdate` with `state: "STATE_ERROR"`.
+
+---
+
+## 5. Storage, Blob Offloading & Real-Time Streaming
+
+```text
+<workspace>/.trajectories/
+├── wire_tap.db
+│   ├── wire_events       (Immutable append-only frame log)
+│   └── session_meta      (Aggregated token & status summary)
+└── blobs/
+    └── 4f/
+        └── 4f7a18b9c2...png  (CAS SHA-256 binary storage for payloads >64 KB)
+```
+
+### 5.1 Append-Only SQLite Architecture
+- **WAL Mode**: Databases use `PRAGMA journal_mode=WAL;` and `PRAGMA synchronous=NORMAL;` to ensure that active agent writes never block concurrent CLI or TUI reader processes.
+- **`wire_events` Table**: An immutable event ledger indexing raw payloads with `seq_num`, `timestamp`, `direction`, `message_type`, `trajectory_id`, `step_index`, and `is_main`.
+- **`session_meta` Table**: Atomically maintained summary record containing token counts (`prompt`, `candidates`, `thoughts`, `cached`), subagent counts, step counts, and session status.
+
+### 5.2 Content-Addressable Storage (CAS `BlobStore`)
+When models emit high-resolution images, video frames, or large file outputs, inline database storage would cause database bloat and degrade query performance. Payloads exceeding `threshold_bytes` (64 KB) are hashed with SHA-256 and offloaded to disk under `.trajectories/blobs/<sha256[:2]>/<sha256>.<ext>`, replaced in the database with a lightweight reference pointer:
 
 ```json
 {
@@ -132,91 +201,31 @@ To keep database queries fast and responsive, string or binary payloads exceedin
 }
 ```
 
-### 3.5 Zero-Lock SQLite WAL Architecture ([`wire_tap.py`](../agy_watch/wire_tap.py))
+### 5.3 Incremental Streaming Cursors
+`SessionWatcher` streams events by tracking `last_event_id`:
+```sql
+SELECT id, seq_num, timestamp, direction, message_type, trajectory_id, step_index, is_main, payload_json
+FROM wire_events WHERE id > ? ORDER BY id ASC;
+```
+This enables zero-polling lag and instantaneous updates as new frames are written by the agent.
 
-* **WAL Mode**: Databases are initialized with `PRAGMA journal_mode=WAL;` and `PRAGMA synchronous=NORMAL;`.
-* **Reader Concurrency**: `SessionWatcher` opens connections in read-only mode with a 5.0-second busy timeout. Multiple CLI instances can tail the exact same session simultaneously without blocking the active agent writer.
-* **Schema Design**:
-  * `wire_events`: Immutable, append-only log of raw WebSocket frames (`seq_num`, `timestamp`, `direction`, `message_type`, `trajectory_id`, `step_index`, `is_main`, `payload_json`).
-  * `session_meta`: Aggregated summary statistics updated atomically on every turn (`session_id`, `status`, `total_tokens`, `prompt_tokens`, `candidates_tokens`, `thoughts_tokens`, `cached_tokens`, `subagent_count`, `step_count`, `updated_at`).
-
-### 3.6 Tool Dispatching & Model Context Protocol (MCP) Integration ([`tool_renderers.py`](../agy_watch/tool_renderers.py))
-
-`agy_watch` provides specialized decoders for all agent tool mechanisms:
-
-1. **In-Process Custom Python Tools**:
-   - Inbound frames deliver `toolCall: {"name": "calc_footprint", "argumentsJson": "..."}`.
-   - The agent executes the local callable and emits outbound `toolResponse: {"id": "...", "responseJson": "..."}`.
-   - `tool_renderers.render_custom_tool()` parses and formats arguments and responses into syntax-highlighted key-value cards.
-
-2. **Model Context Protocol (MCP) Tools**:
-   - Dispatched across stdio or HTTP transports (`PreTool` with `serverName` and `toolName`).
-   - `tool_renderers.render_mcp_tool()` renders server metadata headers, transport badges, and structured parameter grids.
-
-3. **Subagent Spawning (`invoke_subagent`)**:
-   - Correlates pre-tool argument structures with subsequent child agent trajectories to construct live hierarchical execution trees.
-
-### 3.7 Multimodal Shared Brain Storage & Artifact Discovery ([`wire_tap.py`](../agy_watch/wire_tap.py))
-
-When models generate images, videos, or diagrams, binary files may be stored in local workspaces or global Antigravity brain storage. `extract_event_artifacts()` recursively searches:
-1. Active workspace directories and `.trajectories/blobs/`.
-2. `~/.gemini/antigravity/brain/<session_id>/`
-3. `~/.gemini/jetski/brain/<session_id>/`
-4. `~/.antigravity/brain/<session_id>/`
-
-Artifacts are indexed with file sizes, MIME types, and existence checks, enabling immediate in-terminal previewing or external OS opening (`o`).
+### 5.4 Multimodal Shared Brain Discovery
+When tools write media or markdown artifacts, files may reside in the local workspace directory or in shared Antigravity brain storage. `extract_event_artifacts()` dynamically resolves and indexes files across:
+1. `<workspace>/` and `<workspace>/.trajectories/blobs/`.
+2. `~/.gemini/antigravity/brain/<session_id>/`.
+3. `~/.gemini/jetski/brain/<session_id>/`.
+4. `~/.antigravity/brain/<session_id>/`.
 
 ---
 
-## 4. TUI State Management & Stream Deduplication ([`tui.py`](../agy_watch/tui.py))
+## 6. Resilience & Edge Cases Matrix
 
-### 4.1 In-Place Step Deduplication
-Streaming models emit token deltas (`textDelta`, `thinkingDelta`) across multiple WebSocket frames for the same step index. Rather than adding dozens of redundant tree nodes:
-
-* `AgyWatchApp` maintains an internal dictionary `self.step_nodes: Dict[Tuple[str, int, str], TreeNode]` keyed by `(trajectory_id, step_index, step_type)`.
-* When a streaming delta arrives for an existing `step_index`, the TUI updates the existing `TreeNode` label and payload **in-place**.
-* A new tree node is only allocated when a new logical step index begins.
-
-### 4.2 Recursive Tree Construction
-* When `TOOL_CALL: invoke_subagent` is received, an expandable root node is mounted.
-* When events from child `trajectory_id`s arrive (`is_main == False`), a dedicated subagent container branch (`Subagent (<id>) [Active]`) is mounted under the parent agent.
-* Internal subagent tool calls (`write_to_file`, `run_command`, `view_file`) attach as children under that specific worker branch.
-* When the subagent reaches `STATE_DONE`, its branch badge updates dynamically to `[Done]`.
-
-### 4.3 Flicker-Free Session List Diffing
-The session polling timer calculates a 5-tuple signature of all registered sessions:
-$$\text{Signature} = \Big( (\text{sid}_i, \text{updated\_at}_i, \text{status}_i, \text{total\_tokens}_i, \text{step\_count}_i) \Big)_{i=1}^N$$
-If the signature is identical to the previous tick, the `ListView` is not re-rendered, maintaining smooth UI performance and preserving user cursor position.
-
-### 4.4 OS-Native Locale & Time Convention Resolution ([`formatters.py`](../agy_watch/formatters.py))
-
-Timestamps and clocks dynamically resolve user locale conventions:
-1. Environment variables (`LC_ALL`, `LC_TIME`, `LANG`).
-2. OS system preferences (e.g. macOS `AppleLocale` and `AppleICUForce24HourTime`).
-3. Formats dates with 2-digit years (`%x` $\rightarrow$ `08/05/26`) and times in 12-hour AM/PM or 24-hour representation according to regional standards.
-
-### 4.5 User Settings Persistence & Test Isolation ([`settings.py`](../agy_watch/settings.py))
-
-* Preferences (theme, syntax palette, view mode, active tab, wrap text) persist to `~/.antigravity/samples/agy_watch/settings.json`.
-* Non-interactive commands and unit test fixtures use `AGY_WATCH_SETTINGS_PATH` and `AGY_WATCH_REGISTRY_DB` environment overrides to guarantee complete isolation without modifying user configuration.
-
-### 4.6 Control-Bounded Text Selection & Universal JSON Architecture ([`tui.py`](../agy_watch/tui.py))
-
-* **Isolated Widget Selection Buffers**: Instead of a monolithic static canvas, `agy_watch` renders inspectable text elements (prompts, model responses, reasoning) as distinct, theme-styled `SelectableTextArea(read_only=True)` widgets with wrap-aware dynamic height calculation.
-* **Universal Selectable JSON Representation**: Every event (tool calls, prompts, model responses, system events) renders a dedicated, syntax-highlighted `SelectableTextArea(language="json", read_only=True)` containing its full structured payload and parameters.
-* **Direct Fullscreen Modal Reader**: [`FullscreenReaderModal`](../agy_watch/tui.py) mounts `SelectableTextArea(read_only=True, show_line_numbers=True)` directly inside the modal viewport with auto-focus on mount, enabling smooth, reliable mouse drag selection, cursor navigation, and `Ctrl+A` / `Cmd+C` copying.
-* **Multi-Platform Keyboard Layout & Clipboard Synchronization**: Full modifier support for **`Cmd+C`**, **`Alt+C`**, **`Meta+C`**, **`Ctrl+C`**, and **`c`** across macOS (with Apple/PC keyboard mapping via `pbcopy`), Linux (Wayland `wl-copy`, X11 `xclip`/`xsel`), and Windows (`clip.exe`). Pressing copy with highlighted text copies the selection; pressing without selection copies the entire formatted event JSON.
-
----
-
-## 5. Edge Cases & Resilience Matrix
-
-| Edge Case | Scenario | How `agy_watch` Handles It |
+| Protocol Scenario | Root Cause on Wire | How `agy_watch` Handles It |
 | :--- | :--- | :--- |
-| **Agent Process Crash / SIGKILL** | Session was active when the process terminated. | `GlobalRegistry.list_sessions()` uses `os.kill(pid, 0)` to verify process existence. Inactive PIDs are updated to `⚪ IDLE`. |
-| **Concurrent Agents on Same Machine** | Multiple agents running across different directories. | `GlobalRegistry` indexes sessions by unique `session_id` in `~/.antigravity/samples/agy_watch/registry.db`. |
-| **Numeric Strings in Token Usage** | Raw payloads send strings like `"100"` in `usageMetadata`. | `_to_int()` parsing safely coerces all token counts to native integers. |
-| **Read-Only SQLite Access** | Readers inspecting databases in shared environments. | Readers never issue write PRAGMAs; WAL mode is configured exclusively by the writer during initialization. |
-| **Missing Workspace Directory** | Agent initialized without an explicit workspace path. | `install_wire_tap(save_dir=None)` defaults to a timestamped directory under `~/.antigravity/samples/agy_watch/workspaces/session_<timestamp>`. |
-| **High-Frequency LLM Token Deltas** | Streaming models emitting hundreds of partial text tokens per second. | `AgyWatchApp` updates existing `TreeNode` and `Static` inspector widgets in-place using keyed tuple lookups. |
-| **Large Multimodal Blobs (>64 KB)** | High-resolution image generation or video outputs. | Payloads are hashed with SHA-256 and offloaded to CAS `.trajectories/blobs/`, keeping SQLite rows compact. |
+| **Missing `trajectoryId` on Hook Frames** | Protobuf `callHookRequest` lacks top-level trajectory ID. | Correlates `requestId` with the active subagent turn and links matching target arguments back to the subagent branch. |
+| **Action Key Divergence** | SDK calls `create_file`, but harness emits `editFile`. | Normalizes file mutation tool families to correctly match pre-tool approvals with tool execution. |
+| **Agent Process Termination (SIGKILL)** | Agent dies without sending a terminal `stepUpdate`. | `GlobalRegistry` verifies active process existence via `os.kill(pid, 0)` and marks stale sessions as `⚪ IDLE`. |
+| **High-Frequency Streaming Token Deltas** | Models emit hundreds of partial text tokens per second. | Deduplicates streaming deltas in-memory by `(trajectory_id, step_index, step_type)`, updating states in-place. |
+| **String-Formatted Token Counts** | Telemetry delivers numeric strings in `usageMetadata`. | Safely coerces token fields to native integers with fallback defaults. |
+| **Concurrent Multi-Agent Execution** | Multiple agents running concurrently across different directories. | Namespaces databases per workspace and indexes sessions globally in `~/.antigravity/samples/agy_watch/registry.db`. |
+| **Large Multimodal Binary Payloads** | Base64 image/video data exceeding database limits. | Offloads payloads >64 KB to content-addressable SHA-256 disk storage. |
