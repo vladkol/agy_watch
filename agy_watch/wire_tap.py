@@ -183,15 +183,29 @@ class WireTapDB:
         step_idx = None
         is_main = 1
 
-        if "userInput" in payload or "user_input" in payload or "complexUserInput" in payload:
+        if "userInput" in payload or "user_input" in payload or "complexUserInput" in payload or "complex_user_input" in payload:
             msg_type = "USER_PROMPT"
             if not self.user_title:
                 prompt_text = payload.get("userInput") or payload.get("user_input")
-                if not prompt_text and "complexUserInput" in payload:
-                    parts = payload["complexUserInput"].get("parts", [])
-                    prompt_text = " ".join([p.get("text", "") for p in parts if "text" in p])
+                cui = payload.get("complexUserInput") or payload.get("complex_user_input")
+                if not prompt_text and cui:
+                    parts = cui.get("parts", [])
+                    text_parts = [p.get("text", "") for p in parts if "text" in p]
+                    prompt_text = " ".join(text_parts)
+                    for p in parts:
+                        sc = p.get("slashCommand") or p.get("slash_command")
+                        if sc and isinstance(sc, dict) and sc.get("name"):
+                            sc_name = sc.get("name")
+                            prompt_text = f"/{sc_name} {prompt_text}".strip()
                 if prompt_text:
                     self.user_title = prompt_text[:80].strip().replace("\n", " ")
+        elif "automatedTrigger" in payload or "automated_trigger" in payload:
+            msg_type = "TRIGGER_NOTIFICATION"
+            trigger_text = payload.get("automatedTrigger") or payload.get("automated_trigger") or "Trigger Notification"
+            if not self.user_title:
+                self.user_title = f"⏰ Trigger: {str(trigger_text)[:60]}".strip().replace("\n", " ")
+        elif "haltRequest" in payload or "halt_request" in payload:
+            msg_type = "HALT_REQUEST"
         elif "questionResponse" in payload or "question_response" in payload:
             msg_type = "USER_ANSWER"
             qr = payload.get("questionResponse") or payload.get("question_response") or {}
@@ -202,8 +216,13 @@ class WireTapDB:
             if traj_id and self.session_id and traj_id != self.session_id:
                 is_main = 0
         elif "callHookResponse" in payload or "call_hook_response" in payload:
-            msg_type = "POLICY_DECISION"
             chr_resp = payload.get("callHookResponse") or payload.get("call_hook_response") or {}
+            if "preToolResult" in chr_resp or "pre_tool_result" in chr_resp or "preTurnResult" in chr_resp or "pre_turn_result" in chr_resp:
+                msg_type = "POLICY_DECISION"
+            elif "onToolErrorResult" in chr_resp or "on_tool_error_result" in chr_resp:
+                msg_type = "ON_TOOL_ERROR_RESPONSE"
+            else:
+                msg_type = "HOOK_RESPONSE"
             req_id = chr_resp.get("requestId") or chr_resp.get("request_id")
             if req_id and req_id in self.pending_hook_requests:
                 req_traj_id, req_is_main, _ = self.pending_hook_requests[req_id]
@@ -242,11 +261,30 @@ class WireTapDB:
             if not self.session_id:
                 self.session_id = self.cascade_id
         elif "callHookRequest" in payload or "call_hook_request" in payload:
-            msg_type = "CALL_HOOK_PRETOOL"
             chr_obj = payload.get("callHookRequest") or payload.get("call_hook_request") or {}
             req_id = chr_obj.get("requestId") or chr_obj.get("request_id")
-            pt_args = chr_obj.get("preToolArgs") or chr_obj.get("pre_tool_args") or {}
-            t_name = pt_args.get("toolName") or pt_args.get("tool_name")
+            t_name = None
+            if "preToolArgs" in chr_obj or "pre_tool_args" in chr_obj:
+                msg_type = "CALL_HOOK_PRETOOL"
+                pt_args = chr_obj.get("preToolArgs") or chr_obj.get("pre_tool_args") or {}
+                t_name = pt_args.get("toolName") or pt_args.get("tool_name")
+            elif "preTurnArgs" in chr_obj or "pre_turn_args" in chr_obj:
+                msg_type = "CALL_HOOK_PRETURN"
+            elif "postTurnArgs" in chr_obj or "post_turn_args" in chr_obj:
+                msg_type = "CALL_HOOK_POSTTURN"
+            elif "postToolArgs" in chr_obj or "post_tool_args" in chr_obj:
+                msg_type = "CALL_HOOK_POSTTOOL"
+                pt_args = chr_obj.get("postToolArgs") or chr_obj.get("post_tool_args") or {}
+                t_name = pt_args.get("toolName") or pt_args.get("tool_name")
+            elif "onToolErrorArgs" in chr_obj or "on_tool_error_args" in chr_obj:
+                msg_type = "CALL_HOOK_ONTOOLERROR"
+                ote_args = chr_obj.get("onToolErrorArgs") or chr_obj.get("on_tool_error_args") or {}
+                t_name = ote_args.get("toolName") or ote_args.get("tool_name")
+            elif "onCompactionArgs" in chr_obj or "on_compaction_args" in chr_obj:
+                msg_type = "CALL_HOOK_ONCOMPACTION"
+            else:
+                msg_type = "CALL_HOOK_REQUEST"
+
             if self.active_subagent_traj:
                 traj_id = self.active_subagent_traj
             if traj_id and self.session_id and traj_id != self.session_id:
@@ -257,6 +295,10 @@ class WireTapDB:
             msg_type = "CALL_HOOK_RESPONSE"
         elif "trajectoryStateUpdate" in payload or "trajectory_state_update" in payload:
             msg_type = "TRAJECTORY_STATE_UPDATE"
+            tsu = payload.get("trajectoryStateUpdate") or payload.get("trajectory_state_update") or {}
+            tsu_state = tsu.get("state")
+            if tsu_state in ("STATE_CANCELLED", "CANCELLED", 3):
+                self.status = "STATE_CANCELLED"
 
         if "stepUpdate" in payload or "step_update" in payload:
             if msg_type == "INBOUND":
@@ -285,7 +327,7 @@ class WireTapDB:
             if step_idx is not None and is_main:
                 self.step_count = max(self.step_count, step_idx + 1)
 
-            # Check action fields
+            # Check action fields across all 17 tool types
             for action_key in (
                 "invokeSubagent", "invoke_subagent",
                 "generateImage", "generate_image",
@@ -297,6 +339,15 @@ class WireTapDB:
                 "browseUrl", "browse_url",
                 "readBrowserPage", "read_browser_page",
                 "askQuestion", "ask_question",
+                "searchWeb", "search_web",
+                "readUrlContent", "read_url_content",
+                "searchDirectory", "search_directory",
+                "findFile", "find_file",
+                "finish",
+                "compaction",
+                "mcpTool", "mcp_tool",
+                "customTool", "custom_tool",
+                "askPermission", "ask_permission",
             ):
                 if action_key in su:
                     msg_type = "TOOL_CALL"

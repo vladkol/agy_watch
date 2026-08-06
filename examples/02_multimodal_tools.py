@@ -27,7 +27,7 @@ from google.antigravity.hooks import policy
 
 
 async def main() -> None:
-    workspace_dir = os.path.abspath("./.local/tasks/02_multimodal_tools")
+    workspace_dir = os.path.abspath("./.local/tasks/multimodal_tools")
     os.makedirs(workspace_dir, exist_ok=True)
 
     config = LocalAgentConfig(

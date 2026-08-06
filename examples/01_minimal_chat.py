@@ -26,7 +26,7 @@ from google.antigravity import Agent, LocalAgentConfig
 
 
 async def main() -> None:
-    workspace_dir = os.path.abspath("./.local/tasks/01_minimal_chat")
+    workspace_dir = os.path.abspath("./.local/tasks/minimal_chat")
     os.makedirs(workspace_dir, exist_ok=True)
 
     config = LocalAgentConfig(

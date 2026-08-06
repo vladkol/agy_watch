@@ -27,7 +27,7 @@ from google.antigravity.hooks import policy
 
 
 async def main() -> None:
-    workspace_dir = os.path.abspath("./.local/tasks/03_subagents_tree")
+    workspace_dir = os.path.abspath("./.local/tasks/subagents_tree")
     os.makedirs(workspace_dir, exist_ok=True)
 
     config = LocalAgentConfig(

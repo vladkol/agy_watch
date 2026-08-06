@@ -213,19 +213,6 @@ agy_watch attach <session_id>
 
 ---
 
-## Examples
-
-The [`examples/`](examples/) directory contains complete, standalone Antigravity SDK scripts showcasing various agent configurations:
-
-* **[`01_quickstart_chat_streaming.py`](examples/01_quickstart_chat_streaming.py)**: Basic agent reasoning, system prompts, and streaming chat.
-* **[`02_multimodal_image_artifacts.py`](examples/02_multimodal_image_artifacts.py)**: Multimodal image generation and binary artifact extraction.
-* **[`03_custom_and_mcp_tools.py`](examples/03_custom_and_mcp_tools.py)**: In-process custom Python tools and Model Context Protocol (MCP) stdio server integration.
-* **[`04_multi_subagent_hierarchy.py`](examples/04_multi_subagent_hierarchy.py)**: Hierarchical agent swarms with concurrent subagent workers.
-
-For instructions on running the examples, see [`examples/README.md`](examples/README.md).
-
----
-
 > [!IMPORTANT]
 > **Disclaimer**: `agy_watch` is a personal developer debugging and observability tool and is **NOT an official Google product or framework**. It is designed for testing, inspecting, and profiling autonomous agents built with [`google-antigravity==0.1.9`](https://pypi.org/project/google-antigravity/) and its bundled `localharness` binary.
 > The tool is built by Antigravity itself by observing Antigravity SDK and localharness protocol.

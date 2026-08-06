@@ -305,6 +305,21 @@ def build_tool_tree_label(ev: Dict[str, Any]) -> Text:
         t.append("TOOL: ask_question", style="bold yellow")
         if q:
             t.append(f' ("{q[:30]}...")', style="italic bright_green")
+    elif tool_name in ("finish",):
+        t.append("TOOL: finish", style="bold green")
+        fin_dict = su.get("finish") or tool_args
+        summary = fin_dict.get("final_message") or fin_dict.get("output_string") or ""
+        if summary:
+            t.append(f' ("{str(summary)[:25]}...")', style="italic bright_white")
+    elif tool_name in ("compaction", "ActionCompaction"):
+        t.append("TOOL: compaction", style="bold magenta")
+        t.append(" (Pruned Context)", style="italic bright_magenta")
+    elif tool_name in ("ask_permission", "askPermission"):
+        t.append("TOOL: ask_permission", style="bold yellow")
+        act = tool_args.get("Action") or tool_args.get("action") or ""
+        tgt = tool_args.get("Target") or tool_args.get("target") or ""
+        if act or tgt:
+            t.append(f" ({act} {tgt[:15]})", style="italic bright_yellow")
     else:
         # Custom Python Tool
         t.append(f"PYTHON: {tool_name}", style="bold cyan")
@@ -541,12 +556,16 @@ def render_view_file(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Rende
     )
     start_line = args.get("startLine") or args.get("StartLine")
     end_line = args.get("endLine") or args.get("EndLine")
+    is_skill = ev.get("is_skill") or target_file.endswith("SKILL.md") or "/skills/" in target_file
+    skill_name = ev.get("skill_name") or (target_file.split("/skills/")[1].split("/")[0] if "/skills/" in target_file else (os.path.basename(os.path.dirname(target_file)) if target_file.endswith("SKILL.md") else ""))
 
     items: List[RenderableType] = []
 
     header = Table.grid(padding=(0, 2))
     header.add_column(style="bold cyan")
     header.add_column()
+    if is_skill and skill_name:
+        header.add_row("Agent Skill:", f"[bold green]🎯 {skill_name}[/bold green]")
     header.add_row("File Path:", str(target_file or "(unspecified)"))
     if start_line is not None and end_line is not None:
         header.add_row("Viewing Lines:", f"{start_line} to {end_line}")
@@ -560,7 +579,9 @@ def render_view_file(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Rende
         lexer = _guess_syntax_lexer(target_file)
         items.append(Syntax(content, lexer, theme=syntax_theme, line_numbers=True, word_wrap=True))
 
-    return Panel(Group(*items), title="[bold blue]VIEW FILE[/bold blue]", border_style="blue")
+    title_text = f"[bold cyan]🎯 AGENT SKILL: {skill_name}[/bold cyan]" if (is_skill and skill_name) else "[bold blue]VIEW FILE[/bold blue]"
+    border_color = "cyan" if is_skill else "blue"
+    return Panel(Group(*items), title=title_text, border_style=border_color)
 
 
 def render_list_dir(ev: Dict[str, Any]) -> RenderableType:
@@ -932,18 +953,108 @@ def render_custom_tool(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Ren
     return Panel(Group(*items), title=f"[bold cyan]PYTHON TOOL: {tool_name}[/bold cyan]", border_style="cyan")
 
 
-def render_finish(ev: Dict[str, Any]) -> RenderableType:
-    """Renders session completion banner and structured output."""
+def render_finish(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
+    """Renders session completion banner and structured JSON output."""
     args, su = _extract_merged_args_and_result(ev)
 
     finish_dict = su.get("finish") or args
-    summary = finish_dict.get("final_message") or finish_dict.get("output_string") or ev.get("text") or "Task Complete"
+    summary = finish_dict.get("final_message") or finish_dict.get("output_string") or ev.get("output_string") or ev.get("text") or "Task Complete"
 
     items: List[RenderableType] = []
     items.append(Text("🏁 SESSION EXECUTION FINISHED\n", style="bold green"))
-    items.append(Text(f"Summary: {summary}\n", style="bright_white"))
 
-    return Panel(Group(*items), title="[bold green]FINISH (COMPLETE)[/bold green]", border_style="green")
+    # Check if summary is structured JSON output
+    is_structured = False
+    if isinstance(summary, str) and (summary.strip().startswith("{") or summary.strip().startswith("[")):
+        try:
+            parsed = json.loads(summary)
+            items.append(Text("📋 STRUCTURED OUTPUT RESULT:\n", style="bold cyan"))
+            items.append(Syntax(json.dumps(parsed, indent=2, default=str), "json", theme=syntax_theme, line_numbers=True, word_wrap=True))
+            is_structured = True
+        except Exception:
+            pass
+    elif isinstance(summary, (dict, list)):
+        items.append(Text("📋 STRUCTURED OUTPUT RESULT:\n", style="bold cyan"))
+        items.append(Syntax(json.dumps(summary, indent=2, default=str), "json", theme=syntax_theme, line_numbers=True, word_wrap=True))
+        is_structured = True
+
+    if not is_structured:
+        items.append(Text(f"Summary: {summary}\n", style="bright_white"))
+
+    return Panel(Group(*items), title="[bold green]FINISH (COMPLETE)[/bold green]", border_style="green", expand=True, padding=(0, 1))
+
+
+def render_compaction(ev: Dict[str, Any]) -> RenderableType:
+    """Renders context window compaction and token pruning event."""
+    items: List[RenderableType] = []
+    items.append(Text("🧹 CONTEXT WINDOW COMPACTION TRIGGERED\n", style="bold magenta"))
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=18)
+    grid.add_column()
+    grid.add_row("Operation:", "[bold white]Context Compaction[/bold white]")
+    grid.add_row("Status:", "[bold green]COMPLETED[/bold green]")
+    grid.add_row("Description:", "Conversation history pruned to maintain active context within token threshold limits.")
+    items.append(grid)
+    return Panel(Group(*items), title="[bold magenta]CONTEXT COMPACTION[/bold magenta]", border_style="magenta", expand=True, padding=(0, 1))
+
+
+def render_ask_permission(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
+    """Renders runtime permission elevation request with target scope and justification."""
+    args, su = _extract_merged_args_and_result(ev)
+    action = args.get("Action") or args.get("action") or ""
+    target = args.get("Target") or args.get("target") or ""
+    reason = args.get("Reason") or args.get("reason") or ""
+
+    items: List[RenderableType] = []
+    items.append(Text("🔐 RUNTIME PERMISSION ELEVATION REQUEST\n", style="bold yellow"))
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=18)
+    grid.add_column()
+    grid.add_row("Action Type:", str(action or "Unknown"))
+    grid.add_row("Target Scope:", f"[bold white]{target}[/bold white]" if target else "Unknown Scope")
+    if reason:
+        grid.add_row("Justification:", f"[italic yellow]{reason}[/italic yellow]")
+    items.append(grid)
+    return Panel(Group(*items), title="[bold yellow]PERMISSION REQUEST[/bold yellow]", border_style="yellow", expand=True, padding=(0, 1))
+
+
+def render_trigger_notification(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
+    """Renders autonomous background triggers (interval timers, file watchers, webhooks)."""
+    trigger_content = ev.get("trigger_content") or ev.get("text") or ev.get("prompt") or ""
+    t_str = str(trigger_content)
+
+    trigger_kind = "Timer / Interval Trigger"
+    icon = "⏰"
+    if "ADDED:" in t_str or "MODIFIED:" in t_str or "DELETED:" in t_str or ("/" in t_str and "." in t_str):
+        trigger_kind = "Filesystem Change Trigger"
+        icon = "📁"
+    elif "webhook" in t_str.lower():
+        trigger_kind = "Webhook Event Trigger"
+        icon = "🪝"
+
+    items: List[RenderableType] = []
+    items.append(Text(f"{icon} AUTONOMOUS TRIGGER NOTIFICATION\n", style="bold green"))
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=18)
+    grid.add_column()
+    grid.add_row("Trigger Type:", trigger_kind)
+    grid.add_row("Event Payload:", f"[bright_white]{t_str}[/bright_white]")
+    items.append(grid)
+    return Panel(Group(*items), title=f"[bold green]{icon} TRIGGER NOTIFICATION[/bold green]", border_style="green", expand=True, padding=(0, 1))
+
+
+def render_cancellation(ev: Dict[str, Any]) -> RenderableType:
+    """Renders turn cancellation and client halt request."""
+    items: List[RenderableType] = []
+    items.append(Text("🛑 TURN EXECUTION CANCELLED\n", style="bold red"))
+    items.append(Text("The agent turn was aborted programmatically or by client task cancellation.\n", style="bright_white"))
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=18)
+    grid.add_column()
+    grid.add_row("Status:", "[bold red]CANCELLED[/bold red]")
+    grid.add_row("Reason:", "Halt signal received from client runtime.")
+    items.append(grid)
+    return Panel(Group(*items), title="[bold red]TURN CANCELLED[/bold red]", border_style="red", expand=True, padding=(0, 1))
 
 
 def render_generic_tool(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
@@ -959,12 +1070,76 @@ def render_generic_tool(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Re
 
 
 def render_policy_event(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
-    """Renders lifecycle hook decisions, pre-tool evaluations, and security policy block banners."""
+    """Renders lifecycle hook decisions, pre-tool evaluations, error transforms, and security policy block banners."""
+    step_type = ev.get("step_type") or ""
+    msg_type = ev.get("message_type") or ""
     payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
     chr_req = payload.get("callHookRequest") or payload.get("call_hook_request") or {}
     chr_resp = payload.get("callHookResponse") or payload.get("call_hook_response") or {}
-    pre_result = chr_resp.get("preToolResult") or chr_resp.get("pre_tool_result") or {}
 
+    # 1. Error Transform Hook (OnToolError)
+    if step_type == "ON_TOOL_ERROR_HOOK" or msg_type == "CALL_HOOK_ONTOOLERROR":
+        tool_name = ev.get("tool_name") or "tool"
+        ote = chr_req.get("onToolErrorArgs") or chr_req.get("on_tool_error_args") or {}
+        orig_err = ote.get("errorMessage") or ote.get("error_message") or ""
+        items: List[RenderableType] = []
+        items.append(Text("🔄 LIFECYCLE HOOK: ON_TOOL_ERROR (TRANSFORM HOOK)\n", style="bold magenta"))
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan", width=18)
+        grid.add_column()
+        grid.add_row("Target Tool:", f"[bold white]{tool_name}[/bold white]")
+        grid.add_row("Hook Type:", "[bold magenta]Transform Hook (Error Shaping)[/bold magenta]")
+        if orig_err:
+            grid.add_row("Original Error:", f"[bright_red]{orig_err}[/bright_red]")
+        items.append(grid)
+        return Panel(Group(*items), title="[bold magenta]HOOK: ON_TOOL_ERROR[/bold magenta]", border_style="magenta", expand=True, padding=(0, 1))
+
+    if step_type == "ON_TOOL_ERROR_RESULT":
+        custom_err = ev.get("custom_error_message") or ""
+        items = []
+        items.append(Text("🔄 TRANSFORM HOOK: CUSTOM ERROR SHAPED\n", style="bold magenta"))
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan", width=18)
+        grid.add_column()
+        grid.add_row("Shaped Message:", f"[italic yellow]{custom_err}[/italic yellow]")
+        items.append(grid)
+        return Panel(Group(*items), title="[bold magenta]TRANSFORM HOOK RESULT[/bold magenta]", border_style="magenta", expand=True, padding=(0, 1))
+
+    # 2. PreTurn Decide Hook
+    if step_type in ("PRE_TURN_HOOK", "PRE_TURN_DECISION") or msg_type == "CALL_HOOK_PRETURN":
+        decision = ev.get("decision", "ALLOW")
+        reason = ev.get("reason", "")
+        items = []
+        if decision == "DENY":
+            items.append(Text("🔒 PRE-TURN DECIDE HOOK: TURN REJECTED\n", style="bold red"))
+            grid = Table.grid(padding=(0, 2))
+            grid.add_column(style="bold cyan", width=18)
+            grid.add_column()
+            grid.add_row("Hook Decision:", "[bold red]DENY (Turn Execution Prohibited)[/bold red]")
+            if reason:
+                grid.add_row("Reason:", f"[bold yellow]{reason}[/bold yellow]")
+            items.append(grid)
+            return Panel(Group(*items), title="[bold red]PRE-TURN HOOK REJECTION[/bold red]", border_style="red", expand=True, padding=(0, 1))
+        else:
+            items.append(Text("✅ PRE-TURN DECIDE HOOK: TURN APPROVED\n", style="bold green"))
+            return Panel(Group(*items), title="[bold green]PRE-TURN HOOK[/bold green]", border_style="green", expand=True, padding=(0, 1))
+
+    # 3. PostTurn & PostTool Inspect Hooks
+    if step_type == "POST_TURN_HOOK" or msg_type == "CALL_HOOK_POSTTURN":
+        items = [Text("ℹ️ LIFECYCLE HOOK: POST_TURN (INSPECT HOOK)\n", style="bold cyan")]
+        return Panel(Group(*items), title="[bold cyan]INSPECT HOOK: POST_TURN[/bold cyan]", border_style="cyan", expand=True, padding=(0, 1))
+
+    if step_type == "POST_TOOL_HOOK" or msg_type == "CALL_HOOK_POSTTOOL":
+        tool_name = ev.get("tool_name") or "tool"
+        items = [Text(f"ℹ️ LIFECYCLE HOOK: POST_TOOL ({tool_name}) (INSPECT HOOK)\n", style="bold cyan")]
+        return Panel(Group(*items), title=f"[bold cyan]INSPECT HOOK: POST_TOOL ({tool_name})[/bold cyan]", border_style="cyan", expand=True, padding=(0, 1))
+
+    if step_type == "ON_COMPACTION_HOOK" or msg_type == "CALL_HOOK_ONCOMPACTION":
+        items = [Text("ℹ️ LIFECYCLE HOOK: ON_COMPACTION (INSPECT HOOK)\n", style="bold magenta")]
+        return Panel(Group(*items), title="[bold magenta]INSPECT HOOK: ON_COMPACTION[/bold magenta]", border_style="magenta", expand=True, padding=(0, 1))
+
+    # 4. Standard PreTool Decide Hook
+    pre_result = chr_resp.get("preToolResult") or chr_resp.get("pre_tool_result") or {}
     decision = ev.get("decision") or pre_result.get("decision")
     reason = ev.get("reason") or pre_result.get("reason") or ""
 
@@ -1060,7 +1235,7 @@ def render_tool_error(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Rend
     return Panel(Group(*items), title="[bold red]TOOL EXECUTION ERROR[/bold red]", border_style="red", expand=True, padding=(0, 1))
 
 
-# Registry of dedicated tool visualizers
+# Registry of dedicated tool visualizers across all 17 Antigravity tool types
 _TOOL_DISPATCH_TABLE = {
     "run_command": render_run_command,
     "runCommand": render_run_command,
@@ -1095,6 +1270,13 @@ _TOOL_DISPATCH_TABLE = {
     "searchWeb": render_search_web,
     "read_url_content": render_read_url_content,
     "readUrlContent": render_read_url_content,
+    "compaction": render_compaction,
+    "ActionCompaction": render_compaction,
+    "ask_permission": render_ask_permission,
+    "askPermission": render_ask_permission,
+    "trigger_notification": render_trigger_notification,
+    "cancellation": render_cancellation,
+    "cancellation_request": render_cancellation,
     "mcp_tool": render_mcp_tool,
     "mcpTool": render_mcp_tool,
     "call_mcp_tool": render_mcp_tool,
@@ -1108,12 +1290,30 @@ _TOOL_DISPATCH_TABLE = {
 
 
 def render_tool_event(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
-    """Master entry point for rendering tool calls, failure banners, policy events, and arguments."""
+    """Master entry point for rendering tool calls, failure banners, policy events, triggers, and cancellation."""
     step_type = ev.get("step_type")
-    msg_type = ev.get("message_type")
+    msg_type = ev.get("message_type") or ""
 
-    if step_type in ("POLICY_DECISION", "PRE_TOOL_HOOK") or msg_type in ("CALL_HOOK_PRETOOL", "POLICY_DECISION"):
+    if (
+        step_type in (
+            "POLICY_DECISION", "PRE_TOOL_HOOK", "PRE_TURN_HOOK", "PRE_TURN_DECISION",
+            "POST_TURN_HOOK", "POST_TOOL_HOOK", "ON_TOOL_ERROR_HOOK", "ON_TOOL_ERROR_RESULT",
+            "ON_COMPACTION_HOOK", "HOOK_REQUEST", "HOOK_RESPONSE",
+        )
+        or msg_type.startswith("CALL_HOOK_")
+        or msg_type in ("POLICY_DECISION", "HOOK_RESPONSE")
+    ):
         return render_policy_event(ev, syntax_theme=syntax_theme)
+
+    if step_type == "TRIGGER_NOTIFICATION" or msg_type == "TRIGGER_NOTIFICATION":
+        return render_trigger_notification(ev, syntax_theme=syntax_theme)
+
+    if step_type in ("CANCELLATION", "CANCELLATION_REQUEST") or msg_type == "HALT_REQUEST":
+        return render_cancellation(ev)
+
+    if step_type == "COMPACTION":
+        return render_compaction(ev)
+
     if step_type == "TOOL_ERROR":
         return render_tool_error(ev, syntax_theme=syntax_theme)
 
@@ -1135,9 +1335,12 @@ def render_tool_event(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Rend
             render_edit_file,
             render_create_file,
             render_view_file,
+            render_ask_permission,
+            render_trigger_notification,
             render_mcp_tool,
             render_custom_tool,
             render_generic_tool,
+            render_finish,
         ):
             elements.append(renderer(ev, syntax_theme=syntax_theme))
         else:

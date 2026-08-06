@@ -43,6 +43,7 @@ from agy_watch.registry import get_global_registry, GlobalRegistry
 from agy_watch.watcher import SessionWatcher
 from agy_watch.settings import get_user_settings, UserSettings, SUPPORTED_THEMES, AVAILABLE_SYNTAX_THEMES
 from agy_watch.tool_renderers import build_tool_tree_label, render_tool_event
+from agy_watch.formatters import format_locale_time
 from agy_watch.clipboard import copy_to_system_clipboard
 
 
@@ -109,19 +110,45 @@ def _calculate_wrapped_height(text: str, pane_width: int = 65, min_h: int = 6, m
 
 
 class SelectableTextArea(TextArea):
-    """Subclass of TextArea with expanded standard copy keybindings."""
+    """Subclass of TextArea with expanded standard copy keybindings, vi/page navigation, and viewport-synced mouse scrolling."""
 
     BINDINGS = TextArea.BINDINGS + [
         Binding("c", "copy_selected", "Copy", show=False),
-        Binding("alt+c,meta+c", "copy", "Copy", show=False),
+        Binding("ctrl+c,super+c,alt+c,meta+c", "copy_selected", "Copy", show=False),
+        Binding("ctrl+a,super+a,meta+a", "select_all", "Select All", show=False),
+        Binding("j,down", "cursor_down", "Down", show=False),
+        Binding("k,up", "cursor_up", "Up", show=False),
+        Binding("d,pagedown,space", "cursor_page_down", "Page Down", show=False),
+        Binding("u,pageup", "cursor_page_up", "Page Up", show=False),
+        Binding("g,home", "scroll_home", "Top", show=False),
+        Binding("G,end", "scroll_end", "Bottom", show=False),
     ]
 
     def action_copy_selected(self) -> None:
-        """Copies highlighted text if selected, or falls back to app-level smart copy."""
-        if self.selected_text:
-            self.action_copy()
+        """Copies highlighted text if selected, or falls back to whole text/smart copy."""
+        text_to_copy = self.selected_text or self.text
+        if text_to_copy:
+            if hasattr(self.app, "copy_to_clipboard"):
+                self.app.copy_to_clipboard(text_to_copy)
+            else:
+                self.action_copy()
         elif hasattr(self.app, "action_copy_smart"):
             self.app.action_copy_smart()
+
+    def _on_mouse_scroll_down(self, event) -> None:
+        super()._on_mouse_scroll_down(event)
+        # Sync cursor with viewport so scroll_cursor_visible never snaps back to (0, 0)
+        if not getattr(self, "_selecting", False):
+            target_row = min(self.document.line_count - 1, max(0, int(self.scroll_target_y)))
+            from textual.widgets.text_area import Selection
+            self.selection = Selection.cursor((target_row, 0))
+
+    def _on_mouse_scroll_up(self, event) -> None:
+        super()._on_mouse_scroll_up(event)
+        if not getattr(self, "_selecting", False):
+            target_row = max(0, int(self.scroll_target_y))
+            from textual.widgets.text_area import Selection
+            self.selection = Selection.cursor((target_row, 0))
 
 
 class FullscreenReaderModal(ModalScreen):
@@ -131,6 +158,7 @@ class FullscreenReaderModal(ModalScreen):
         Binding("escape,q", "dismiss", "Close", show=True),
         Binding("w", "toggle_wrap", "Toggle Wrap", show=True),
         Binding("c,ctrl+c,super+c,alt+c,meta+c", "copy_modal_content", "Copy", show=True),
+        Binding("ctrl+a,super+a,meta+a,a", "select_all_modal", "Select All", show=True),
     ]
 
     def __init__(
@@ -152,7 +180,7 @@ class FullscreenReaderModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-container"):
-            yield Static(f" [bold white]═══ {self.reader_title} ═══[/bold white] (Press ESC/Q to close, W to wrap, click & drag to select text, C / Ctrl+C to copy)", id="modal-header")
+            yield Static(f" [bold white]═══ {self.reader_title} ═══[/bold white] (Press ESC/Q to close, W to wrap, click & drag to select text, C / Ctrl+C to copy, A / Ctrl+A to select all)", id="modal-header")
             yield SelectableTextArea(
                 "",
                 id="modal-text-area",
@@ -170,6 +198,11 @@ class FullscreenReaderModal(ModalScreen):
     def action_toggle_wrap(self) -> None:
         self.wrap_mode = not self.wrap_mode
         self._render_content()
+
+    def action_select_all_modal(self) -> None:
+        """Selects all content in modal text area."""
+        ta = self.query_one("#modal-text-area", TextArea)
+        ta.select_all()
 
     def action_copy_modal_content(self) -> None:
         """Copies reader content directly to OS clipboard."""
@@ -199,6 +232,7 @@ class FullscreenReaderModal(ModalScreen):
                 lang = "markdown"
 
         ta.text = text_content
+        ta.soft_wrap = self.wrap_mode
         try:
             ta.language = lang
             ta.theme = self.syntax_theme
@@ -471,6 +505,11 @@ class AgyWatchApp(App):
 
     async def on_mount(self) -> None:
         """Initializes data loading, user settings restoration, and background polling timers."""
+        try:
+            tree = self.query_one("#steps-tree", Tree)
+            tree.guide_depth = 2
+        except Exception:
+            pass
         if hasattr(self, "theme") and self.settings.theme:
             try:
                 self.theme = self.settings.theme
@@ -620,18 +659,34 @@ class AgyWatchApp(App):
             traj_id = str(ev.get("trajectory_id") or "main")
             step_idx = ev.get("step_index")
             sub_id = ev.get("subagent_id") or ev.get("trajectory_id")
-
             step_key = (traj_id, step_idx, step_type)
+            children = ev.get("child_events") or []
+
+            def _populate_child_nodes(parent_node, child_list):
+                if not parent_node.children and child_list:
+                    parent_node.allow_expand = True
+                    for child in child_list:
+                        c_icon = "📤" if child.get("direction") == "TO_HARNESS" else "📥"
+                        c_id = f"#{child.get('id')}" if child.get("id") is not None else ""
+                        c_dir = child.get("direction", "WIRE")
+                        c_type = child.get("message_type", "EVENT")
+                        c_label = f"↳ {c_icon} {c_id} {c_dir}: {c_type}".strip()
+                        parent_node.add_leaf(c_label, data=child)
 
             # Check if this step already has an active node in the tree (deduplicate streaming deltas)
             if step_idx is not None and step_key in self.step_nodes:
                 existing_node = self.step_nodes[step_key]
                 existing_node.set_label(label)
                 existing_node.data = ev
+                if children:
+                    _populate_child_nodes(existing_node, children)
             else:
                 if not self.tree_mode:
-                    node = tree.root.add(label, data=ev)
-                    node.allow_expand = True
+                    if children:
+                        node = tree.root.add(label, data=ev, expand=False)
+                        _populate_child_nodes(node, children)
+                    else:
+                        node = tree.root.add_leaf(label, data=ev)
                     if step_idx is not None:
                         self.step_nodes[step_key] = node
                 else:
@@ -644,8 +699,11 @@ class AgyWatchApp(App):
                             if step_idx is not None:
                                 self.step_nodes[step_key] = invoke_node
                         else:
-                            node = tree.root.add(label, data=ev)
-                            node.allow_expand = True
+                            if children:
+                                node = tree.root.add(label, data=ev, expand=False)
+                                _populate_child_nodes(node, children)
+                            else:
+                                node = tree.root.add_leaf(label, data=ev)
                             if step_idx is not None:
                                 self.step_nodes[step_key] = node
                     else:
@@ -655,7 +713,11 @@ class AgyWatchApp(App):
                             self.subagent_branches[sub_id] = sub_branch
 
                         sub_branch = self.subagent_branches[sub_id]
-                        node = sub_branch.add(label, data=ev)
+                        if children:
+                            node = sub_branch.add(label, data=ev, expand=False)
+                            _populate_child_nodes(node, children)
+                        else:
+                            node = sub_branch.add_leaf(label, data=ev)
                         if step_idx is not None:
                             self.step_nodes[step_key] = node
 
@@ -763,49 +825,72 @@ class AgyWatchApp(App):
             t.append(f"{actor_tag} ", style=actor_style)
 
         if step_type == "USER_INPUT":
-            t.append(" USER_PROMPT: ", style="bold green")
+            sc = ev.get("slash_command")
+            if sc:
+                t.append(f"⚡ {sc} PROMPT: ", style="bold cyan")
+            else:
+                t.append("PROMPT: ", style="bold green")
             t.append(f"{(ev.get('prompt') or '')[:35]}...", style="green")
+        elif step_type == "TRIGGER_NOTIFICATION":
+            t.append("⏰ TRIGGER: ", style="bold green")
+            trig_s = str(ev.get("trigger_content") or ev.get("text") or "")
+            t.append(f"{trig_s[:35]}...", style="bright_green")
+        elif step_type in ("CANCELLATION", "CANCELLATION_REQUEST"):
+            t.append("🛑 CANCELLED", style="bold red")
+        elif step_type == "COMPACTION":
+            t.append("🧹 COMPACTED", style="bold magenta")
         elif step_type == "USER_ANSWER":
-            t.append(" 💬 USER_ANSWER: ", style="bold bright_green")
+            t.append("💬 USER_ANSWER: ", style="bold bright_green")
             ans_str = ev.get('text') or ev.get('prompt') or ""
             t.append(f'"{ans_str[:40]}"', style="bright_green")
-        elif step_type == "POLICY_DECISION":
+        elif step_type in ("POLICY_DECISION", "PRE_TURN_DECISION"):
             decision = ev.get("decision", "ALLOW")
-            tool_name = ev.get("tool_name") or "tool"
+            tool_name = ev.get("tool_name") or ("Turn" if step_type == "PRE_TURN_DECISION" else "tool")
             reason = ev.get("reason") or ""
             if decision == "DENY":
-                t.append(" 🔒 POLICY_DENIAL: ", style="bold yellow")
+                t.append("🔒 POLICY_DENIAL: ", style="bold yellow")
                 t.append(f"{tool_name}", style="bold red")
                 if reason:
                     t.append(f' ("{reason[:35]}")', style="italic yellow")
             else:
-                t.append(f" ✅ HOOK_APPROVED: {tool_name}", style="green")
+                t.append(f"✅ APPROVED: {tool_name}", style="green")
         elif step_type == "PRE_TOOL_HOOK":
             tool_name = ev.get("tool_name") or "tool"
-            t.append(f" ⏳ PRE_TOOL: {tool_name} (Evaluating policies...)", style="italic bright_black")
+            t.append(f"⏳ PRE_TOOL: {tool_name} (evaluating...)", style="italic bright_black")
+        elif step_type == "PRE_TURN_HOOK":
+            t.append("⏳ PRE_TURN: (evaluating...)", style="italic bright_black")
+        elif step_type == "POST_TURN_HOOK":
+            t.append("ℹ️ POST_TURN", style="italic cyan")
+        elif step_type == "POST_TOOL_HOOK":
+            tool_name = ev.get("tool_name") or "tool"
+            t.append(f"ℹ️ POST_TOOL: {tool_name}", style="italic cyan")
+        elif step_type in ("ON_TOOL_ERROR_HOOK", "ON_TOOL_ERROR_RESULT"):
+            tool_name = ev.get("tool_name") or "tool"
+            t.append(f"🔄 TRANSFORM: {tool_name}", style="bold magenta")
+        elif step_type == "ON_COMPACTION_HOOK":
+            t.append("ℹ️ ON_COMPACTION", style="italic magenta")
         elif step_type == "TOOL_ERROR":
             tool_name = ev.get("tool_name") or "tool"
             err_msg = ev.get("error_message") or ev.get("text") or ""
-            t.append(" ❌ TOOL_ERROR: ", style="bold red")
+            t.append("❌ TOOL_ERROR: ", style="bold red")
             t.append(f"{tool_name}", style="bold yellow")
             if err_msg:
                 first_line = str(err_msg).strip().splitlines()[0]
                 t.append(f' ("{first_line[:35]}")', style="italic bright_red")
         elif step_type == "SUBAGENT_PROMPT":
-            t.append(" SUBAGENT_PROMPT: ", style="bold green")
+            t.append("SUBAGENT_PROMPT: ", style="bold green")
             t.append(f"{(ev.get('prompt') or '')[:35]}...", style="green")
         elif step_type == "TOOL_CALL":
-            t.append(" ")
             tool_label = build_tool_tree_label(ev)
             t.append_text(tool_label)
         elif step_type == "SUBAGENT_REPORT":
-            t.append(" SUBAGENT_REPORT", style="bold blue")
+            t.append("SUBAGENT_REPORT", style="bold blue")
         elif step_type == "TEXT_RESPONSE":
-            t.append(" MODEL_RESPONSE", style="bold white")
+            t.append("RESPONSE", style="bold white")
         elif step_type == "MODEL_REASONING":
-            t.append(" THINKING...", style="italic bright_black")
+            t.append("THINKING...", style="italic bright_black")
         else:
-            t.append(f" {msg_type}", style="bright_black")
+            t.append(f"{msg_type}", style="bright_black")
 
         return t
 
@@ -839,13 +924,28 @@ class AgyWatchApp(App):
             tok_area.display = False
             return
 
-        sub_tag = ev.get("subagent_id") or ev.get("trajectory_id") or "sub"
-        actor_label = "Root Agent" if ev.get("is_main") else f"Subagent ({sub_tag})"
+        # Meta overview table
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=14)
+        t.add_column()
+        t.add_row("Session ID:", str(ev.get("session_id") or "main"))
+        t.add_row("Trajectory ID:", str(ev.get("trajectory_id") or "root"))
 
-        t = Text()
-        t.append(f"Event ID: {ev.get('id')} | Seq: {ev.get('seq_num')} | Direction: {ev.get('direction')}\n", style="bold cyan")
-        t.append(f"Type: {ev.get('step_type')} ({ev.get('message_type')})\n", style="bold yellow")
-        t.append(f"Actor: {actor_label}\n", style="magenta")
+        children = ev.get("child_events") or []
+        if len(children) > 1:
+            seq_summary = " ➔ ".join([f"#{c.get('id')} ({c.get('direction')})" for c in children if c.get('id') is not None])
+            t.add_row("Sequence #:", seq_summary or str(ev.get("id")))
+            t.add_row("Direction:", "TWO_WAY (Merged Transaction)")
+        else:
+            t.add_row("Sequence #:", str(ev.get("id") or ev.get("seq_num") or "N/A"))
+            t.add_row("Direction:", str(ev.get("direction", "N/A")))
+
+        t.add_row("Timestamp:", format_locale_time(ev.get("timestamp")))
+        t.add_row("Step Index:", str(ev.get("step_index", "N/A")))
+        msg_type_str = ev.get("step_type") or ev.get("message_type") or "EVENT"
+        if ev.get("message_type") and ev.get("message_type") != ev.get("step_type"):
+            msg_type_str = f"{ev.get('step_type')} ({ev.get('message_type')})"
+        t.add_row("Message Type:", msg_type_str)
         meta.update(t)
 
         tool_name = ev.get("tool_name")
@@ -874,8 +974,14 @@ class AgyWatchApp(App):
         # 2. Tool / Policy / Exception Visualizer Card
         is_tool_or_policy = (
             bool(tool_name)
-            or ev.get("step_type") in ("TOOL_CALL", "TOOL_ERROR", "POLICY_DECISION", "PRE_TOOL_HOOK")
-            or ev.get("message_type") in ("CALL_HOOK_PRETOOL", "POLICY_DECISION")
+            or ev.get("step_type") in (
+                "TOOL_CALL", "TOOL_ERROR", "POLICY_DECISION", "PRE_TOOL_HOOK",
+                "PRE_TURN_HOOK", "PRE_TURN_DECISION", "POST_TURN_HOOK", "POST_TOOL_HOOK",
+                "ON_TOOL_ERROR_HOOK", "ON_TOOL_ERROR_RESULT", "ON_COMPACTION_HOOK",
+                "TRIGGER_NOTIFICATION", "CANCELLATION", "CANCELLATION_REQUEST", "COMPACTION",
+            )
+            or str(ev.get("message_type", "")).startswith("CALL_HOOK_")
+            or ev.get("message_type") in ("POLICY_DECISION", "TRIGGER_NOTIFICATION", "HALT_REQUEST")
         )
         if is_tool_or_policy:
             tool_card_renderable = render_tool_event(ev, syntax_theme=self.settings.syntax_theme)
