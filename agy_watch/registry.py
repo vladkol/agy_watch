@@ -170,10 +170,11 @@ class GlobalRegistry:
             pid = d.get("pid")
             status = d.get("status")
 
-            # Determine live status: process must be alive and status not terminal
-            is_active_state = status not in ("STATE_DONE", "STATE_ERROR", "STATE_CANCELLED")
+            # Determine live status: process must be alive and not cancelled
             pid_alive = is_pid_alive(pid) if pid else False
-            d["is_live"] = is_active_state and pid_alive
+            d["is_live"] = pid_alive and (status != "STATE_CANCELLED")
+            if not pid_alive and status in ("STATE_ACTIVE", "STATE_RUNNING"):
+                d["status"] = "STATE_DONE"
             results.append(d)
 
         if stale_ids:
@@ -202,8 +203,10 @@ class GlobalRegistry:
         d = dict(row)
         pid = d.get("pid")
         status = d.get("status")
-        is_active_state = status not in ("STATE_DONE", "STATE_ERROR", "STATE_CANCELLED")
-        d["is_live"] = is_active_state and (is_pid_alive(pid) if pid else False)
+        pid_alive = is_pid_alive(pid) if pid else False
+        d["is_live"] = pid_alive and (status != "STATE_CANCELLED")
+        if not pid_alive and status in ("STATE_ACTIVE", "STATE_RUNNING"):
+            d["status"] = "STATE_DONE"
         return d
 
 

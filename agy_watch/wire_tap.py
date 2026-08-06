@@ -299,6 +299,15 @@ class WireTapDB:
             tsu_state = tsu.get("state")
             if tsu_state in ("STATE_CANCELLED", "CANCELLED", 3):
                 self.status = "STATE_CANCELLED"
+            elif tsu_state in ("STATE_ERROR", "ERROR", 4):
+                self.status = "STATE_ERROR"
+            elif tsu_state in ("STATE_DONE", "DONE", 2):
+                self.status = "STATE_DONE"
+            elif tsu_state in ("STATE_RUNNING", "RUNNING", 1):
+                self.status = "STATE_RUNNING"
+        elif "sessionEndResponse" in payload or "session_end_response" in payload:
+            msg_type = "SESSION_END_RESPONSE"
+            self.status = "STATE_DONE"
 
         if "stepUpdate" in payload or "step_update" in payload:
             if msg_type == "INBOUND":
@@ -322,7 +331,10 @@ class WireTapDB:
                     self.subagents.add(traj_id)
 
             if is_main and state:
-                self.status = state
+                if state == "STATE_ERROR":
+                    self.status = "STATE_ERROR"
+                elif self.status not in ("STATE_CANCELLED", "STATE_ERROR", "STATE_DONE"):
+                    self.status = "STATE_ACTIVE"
 
             if step_idx is not None and is_main:
                 self.step_count = max(self.step_count, step_idx + 1)

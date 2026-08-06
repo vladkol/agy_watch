@@ -38,6 +38,7 @@ from textual.widgets import Header, Footer, Static, ListView, ListItem, Tree, Ta
 from textual.widgets.tree import TreeNode
 from textual.screen import ModalScreen
 from textual.binding import Binding
+from textual import events
 
 from agy_watch.registry import get_global_registry, GlobalRegistry
 from agy_watch.watcher import SessionWatcher
@@ -110,18 +111,25 @@ def _calculate_wrapped_height(text: str, pane_width: int = 65, min_h: int = 6, m
 
 
 class SelectableTextArea(TextArea):
-    """Subclass of TextArea with expanded standard copy keybindings, vi/page navigation, and viewport-synced mouse scrolling."""
+    """Subclass of TextArea with expanded standard copy keybindings and vi/page navigation."""
 
     BINDINGS = TextArea.BINDINGS + [
         Binding("c", "copy_selected", "Copy", show=False),
-        Binding("ctrl+c,super+c,alt+c,meta+c", "copy_selected", "Copy", show=False),
-        Binding("ctrl+a,super+a,meta+a", "select_all", "Select All", show=False),
-        Binding("j,down", "cursor_down", "Down", show=False),
-        Binding("k,up", "cursor_up", "Up", show=False),
-        Binding("d,pagedown,space", "cursor_page_down", "Page Down", show=False),
-        Binding("u,pageup", "cursor_page_up", "Page Up", show=False),
-        Binding("g,home", "scroll_home", "Top", show=False),
-        Binding("G,end", "scroll_end", "Bottom", show=False),
+        Binding("ctrl+c", "copy_selected", "Copy", show=False),
+        Binding("ctrl+a", "select_all", "Select All", show=False),
+        Binding("j", "cursor_down", "Down", show=False),
+        Binding("k", "cursor_up", "Up", show=False),
+        Binding("down", "cursor_down", "Down", show=False),
+        Binding("up", "cursor_up", "Up", show=False),
+        Binding("d", "cursor_page_down", "Page Down", show=False),
+        Binding("pagedown", "cursor_page_down", "Page Down", show=False),
+        Binding("space", "cursor_page_down", "Page Down", show=False),
+        Binding("u", "cursor_page_up", "Page Up", show=False),
+        Binding("pageup", "cursor_page_up", "Page Up", show=False),
+        Binding("g", "scroll_home", "Top", show=False),
+        Binding("home", "scroll_home", "Top", show=False),
+        Binding("G", "scroll_end", "Bottom", show=False),
+        Binding("end", "scroll_end", "Bottom", show=False),
     ]
 
     def action_copy_selected(self) -> None:
@@ -135,30 +143,63 @@ class SelectableTextArea(TextArea):
         elif hasattr(self.app, "action_copy_smart"):
             self.app.action_copy_smart()
 
-    def _on_mouse_scroll_down(self, event) -> None:
-        super()._on_mouse_scroll_down(event)
-        # Sync cursor with viewport so scroll_cursor_visible never snaps back to (0, 0)
-        if not getattr(self, "_selecting", False):
-            target_row = min(self.document.line_count - 1, max(0, int(self.scroll_target_y)))
-            from textual.widgets.text_area import Selection
-            self.selection = Selection.cursor((target_row, 0))
-
-    def _on_mouse_scroll_up(self, event) -> None:
-        super()._on_mouse_scroll_up(event)
-        if not getattr(self, "_selecting", False):
-            target_row = max(0, int(self.scroll_target_y))
-            from textual.widgets.text_area import Selection
-            self.selection = Selection.cursor((target_row, 0))
+    async def _on_key(self, event: events.Key) -> None:
+        if self.read_only:
+            key = event.key
+            if key in ("a", "ctrl+a"):
+                event.prevent_default()
+                event.stop()
+                self.select_all()
+                return
+            elif key in ("c", "ctrl+c"):
+                event.prevent_default()
+                event.stop()
+                self.action_copy_selected()
+                return
+            elif key in ("j", "down"):
+                event.prevent_default()
+                event.stop()
+                self.action_cursor_down()
+                return
+            elif key in ("k", "up"):
+                event.prevent_default()
+                event.stop()
+                self.action_cursor_up()
+                return
+            elif key in ("d", "space", "pagedown"):
+                event.prevent_default()
+                event.stop()
+                self.action_cursor_page_down()
+                return
+            elif key in ("u", "pageup"):
+                event.prevent_default()
+                event.stop()
+                self.action_cursor_page_up()
+                return
+            elif key in ("g", "home"):
+                event.prevent_default()
+                event.stop()
+                self.action_scroll_home()
+                return
+            elif key in ("G", "end"):
+                event.prevent_default()
+                event.stop()
+                self.action_scroll_end()
+                return
+        await super()._on_key(event)
 
 
 class FullscreenReaderModal(ModalScreen):
     """Full-screen modal for reading files and prompt traces with selectable TextArea and syntax highlighting."""
 
     BINDINGS = [
-        Binding("escape,q", "dismiss", "Close", show=True),
-        Binding("w", "toggle_wrap", "Toggle Wrap", show=True),
-        Binding("c,ctrl+c,super+c,alt+c,meta+c", "copy_modal_content", "Copy", show=True),
-        Binding("ctrl+a,super+a,meta+a,a", "select_all_modal", "Select All", show=True),
+        Binding("escape", "dismiss", "Close", show=True, priority=True),
+        Binding("q", "dismiss", "Close", show=True, priority=True),
+        Binding("w", "toggle_wrap", "Toggle Wrap", show=True, priority=True),
+        Binding("a", "select_all_modal", "Select All", show=True, priority=True),
+        Binding("ctrl+a", "select_all_modal", "Select All", show=False, priority=True),
+        Binding("c", "copy_modal_content", "Copy", show=True, priority=True),
+        Binding("ctrl+c", "copy_modal_content", "Copy", show=False, priority=True),
     ]
 
     def __init__(
@@ -177,27 +218,47 @@ class FullscreenReaderModal(ModalScreen):
         self.is_markdown = is_markdown
         self.syntax_theme = syntax_theme
         self.wrap_mode = wrap_mode
+        self.text_content = ""
+        self.lang = "text"
+
+        if self.file_path and os.path.exists(self.file_path):
+            try:
+                with open(self.file_path, "r", encoding="utf-8", errors="replace") as f:
+                    self.text_content = f.read()
+                self.lang = get_syntax_lexer_for_path(self.file_path)
+            except Exception as e:
+                self.text_content = f"Error reading file: {e}"
+        elif self.raw_content is not None:
+            self.text_content = self.raw_content
+            if self.is_markdown:
+                self.lang = "markdown"
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-container"):
             yield Static(f" [bold white]═══ {self.reader_title} ═══[/bold white] (Press ESC/Q to close, W to wrap, click & drag to select text, C / Ctrl+C to copy, A / Ctrl+A to select all)", id="modal-header")
             yield SelectableTextArea(
-                "",
+                self.text_content,
+                language=self.lang,
+                theme=self.syntax_theme,
+                soft_wrap=self.wrap_mode,
                 id="modal-text-area",
                 read_only=True,
                 show_line_numbers=True,
             )
 
     def on_mount(self) -> None:
-        self._render_content()
+        ta = self.query_one("#modal-text-area", TextArea)
+        ta.cursor_blink = False
         try:
-            self.query_one("#modal-text-area", TextArea).focus()
+            ta.focus()
         except Exception:
             pass
 
     def action_toggle_wrap(self) -> None:
         self.wrap_mode = not self.wrap_mode
-        self._render_content()
+        ta = self.query_one("#modal-text-area", TextArea)
+        ta.soft_wrap = self.wrap_mode
+        self.notify(f"Soft Wrap: {'Enabled' if self.wrap_mode else 'Disabled'}")
 
     def action_select_all_modal(self) -> None:
         """Selects all content in modal text area."""
@@ -214,30 +275,6 @@ class FullscreenReaderModal(ModalScreen):
                 self.notify("✓ Copied selection to clipboard.")
             except Exception as e:
                 self.notify(f"Copy error: {e}", severity="error")
-
-    def _render_content(self) -> None:
-        ta = self.query_one("#modal-text-area", TextArea)
-        lang = "text"
-        text_content = ""
-        if self.file_path and os.path.exists(self.file_path):
-            try:
-                with open(self.file_path, "r", encoding="utf-8", errors="replace") as f:
-                    text_content = f.read()
-                lang = get_syntax_lexer_for_path(self.file_path)
-            except Exception as e:
-                text_content = f"Error reading file: {e}"
-        elif self.raw_content is not None:
-            text_content = self.raw_content
-            if self.is_markdown:
-                lang = "markdown"
-
-        ta.text = text_content
-        ta.soft_wrap = self.wrap_mode
-        try:
-            ta.language = lang
-            ta.theme = self.syntax_theme
-        except Exception:
-            pass
 
 
 class AgyWatchApp(App):
@@ -419,11 +456,13 @@ class AgyWatchApp(App):
         Binding("q", "quit", "Quit", show=True),
         Binding("space", "toggle_follow", "Follow/Pause", show=True),
         Binding("f", "fullscreen_inspect", "Fullscreen", show=True),
-        Binding("p,s", "cycle_syntax_theme", "Theme", show=True),
+        Binding("p", "cycle_syntax_theme", "Theme", show=True),
+        Binding("s", "cycle_syntax_theme", "Theme", show=False),
         Binding("o", "open_selected_media_external", "Open External", show=True),
         Binding("a", "toggle_inspector_tab", "Toggle Tab", show=True),
         Binding("t", "toggle_tree_mode", "Tree/Flat", show=True),
-        Binding("c,ctrl+c,super+c,alt+c,meta+c", "copy_smart", "Copy", show=True),
+        Binding("c", "copy_smart", "Copy", show=True),
+        Binding("ctrl+c", "copy_smart", "Copy", show=False),
         Binding("r", "force_refresh_sessions", "Refresh", show=True),
         Binding("0", "filter_all_agents", "All Agents", show=False),
         Binding("1", "filter_subagent_1", "Subagent 1", show=False),
@@ -526,8 +565,16 @@ class AgyWatchApp(App):
         self.set_interval(0.1, self.poll_live_updates)
         self.set_interval(1.5, self.refresh_sessions_list)
 
+    @property
+    def is_modal_active(self) -> bool:
+        """Returns True if a modal screen is currently displayed over the main app."""
+        return len(self.screen_stack) > 1 or isinstance(self.screen, ModalScreen)
+
     def refresh_sessions_list(self, force: bool = False) -> None:
         """Reloads the session list from global registry only if data changed."""
+        if self.is_modal_active and not force:
+            return
+
         sessions = self.registry.list_sessions()
         new_sig = tuple((s["session_id"], s["updated_at"], s["status"], s["total_tokens"], s["step_count"]) for s in sessions)
 
@@ -725,8 +772,9 @@ class AgyWatchApp(App):
                         if state in ("STATE_DONE", "STATE_ERROR"):
                             sub_branch.set_label(f"🤖 [bold cyan]Subagent ({str(sub_id)[:8]})[/bold cyan] [{state[6:]}]")
 
-            # If user is following, automatically inspect latest step
-            if self.is_following:
+            # If user is following, automatically inspect latest step (unless a modal is active)
+            is_modal_active = len(self.screen_stack) > 1 or isinstance(self.screen, ModalScreen)
+            if self.is_following and not is_modal_active:
                 self.selected_event = ev
                 self._render_inspector_event(ev)
 
@@ -969,7 +1017,8 @@ class AgyWatchApp(App):
             p_title.display = True
             p_title.update(f"─── {header_title} (Selectable) ───")
             p_area.display = True
-            p_area.text = str(prompt_text)
+            if p_area.text != str(prompt_text):
+                p_area.text = str(prompt_text)
             try:
                 p_area.theme = self.settings.syntax_theme
             except Exception:
@@ -1004,7 +1053,8 @@ class AgyWatchApp(App):
             resp_title.display = True
             resp_title.update("─── MODEL RESPONSE (Selectable) ───")
             resp_area.display = True
-            resp_area.text = str(ev["text"])
+            if resp_area.text != str(ev["text"]):
+                resp_area.text = str(ev["text"])
             try:
                 resp_area.theme = self.settings.syntax_theme
             except Exception:
@@ -1019,7 +1069,8 @@ class AgyWatchApp(App):
             th_title.display = True
             th_title.update("─── MODEL REASONING (Selectable) ───")
             th_area.display = True
-            th_area.text = str(ev["thinking"])
+            if th_area.text != str(ev["thinking"]):
+                th_area.text = str(ev["thinking"])
             try:
                 th_area.theme = self.settings.syntax_theme
             except Exception:
@@ -1039,7 +1090,8 @@ class AgyWatchApp(App):
         json_title.display = True
         json_title.update("─── EVENT PAYLOAD & DATA (Selectable JSON) ───")
         json_area.display = True
-        json_area.text = formatted_json
+        if json_area.text != formatted_json:
+            json_area.text = formatted_json
         try:
             json_area.language = "json"
             json_area.theme = self.settings.syntax_theme
@@ -1104,31 +1156,35 @@ class AgyWatchApp(App):
         if event.node.data:
             self.selected_event = event.node.data
             self.is_following = False
-            self._render_inspector_event(event.node.data)
-            try:
-                tabs = self.query_one("#inspector-tabs", TabbedContent)
-                if tabs.active != "tab-details":
-                    tabs.active = "tab-details"
-                    self.settings.active_tab = "tab-details"
-                    self.settings.save()
-            except Exception:
-                pass
+            if not self.is_modal_active:
+                self._render_inspector_event(event.node.data)
+                try:
+                    tabs = self.query_one("#inspector-tabs", TabbedContent)
+                    if tabs.active != "tab-details":
+                        tabs.active = "tab-details"
+                        self.settings.active_tab = "tab-details"
+                        self.settings.save()
+                except Exception:
+                    pass
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         """Updates inspector and switches to Event Details tab as cursor navigates tree nodes."""
         if event.node.data:
             self.selected_event = event.node.data
-            self._render_inspector_event(event.node.data)
-            try:
-                tabs = self.query_one("#inspector-tabs", TabbedContent)
-                if tabs.active != "tab-details":
-                    tabs.active = "tab-details"
-                    self.settings.active_tab = "tab-details"
-                    self.settings.save()
-            except Exception:
-                pass
+            if not self.is_modal_active:
+                self._render_inspector_event(event.node.data)
+                try:
+                    tabs = self.query_one("#inspector-tabs", TabbedContent)
+                    if tabs.active != "tab-details":
+                        tabs.active = "tab-details"
+                        self.settings.active_tab = "tab-details"
+                        self.settings.save()
+                except Exception:
+                    pass
 
     def action_toggle_follow(self) -> None:
+        if self.is_modal_active:
+            return
         self.is_following = not self.is_following
         self.settings.auto_follow = self.is_following
         self.settings.save()
@@ -1136,6 +1192,8 @@ class AgyWatchApp(App):
 
     def action_toggle_tree_mode(self) -> None:
         """Toggles between Hierarchical Recursive Tree Mode and Flat Timeline Mode."""
+        if self.is_modal_active:
+            return
         self.tree_mode = not self.tree_mode
         self.settings.view_mode = "tree" if self.tree_mode else "flat"
         self.settings.save()
@@ -1153,6 +1211,8 @@ class AgyWatchApp(App):
 
     def action_toggle_inspector_tab(self) -> None:
         """Toggles active inspector tab between Event Details and Artifacts & Files."""
+        if self.is_modal_active:
+            return
         try:
             tabs = self.query_one("#inspector-tabs", TabbedContent)
             if tabs.active == "tab-details":
@@ -1169,6 +1229,8 @@ class AgyWatchApp(App):
 
     def action_cycle_syntax_theme(self) -> None:
         """Cycles through available app themes + syntax themes and saves to user settings."""
+        if self.is_modal_active:
+            return
         current_theme = getattr(self, "theme", None) or self.settings.theme
         matching_idx = 0
         for i, t in enumerate(SUPPORTED_THEMES):
@@ -1200,6 +1262,8 @@ class AgyWatchApp(App):
 
     def action_open_selected_media_external(self) -> None:
         """Opens the selected artifact or media file in the OS external viewer."""
+        if self.is_modal_active:
+            return
         tabs = self.query_one("#inspector-tabs", TabbedContent)
 
         if tabs.active == "tab-artifacts" and self.selected_artifact_path:
@@ -1222,6 +1286,8 @@ class AgyWatchApp(App):
 
     def action_fullscreen_inspect(self) -> None:
         """Opens full-screen modal reader with syntax highlighting."""
+        if self.is_modal_active:
+            return
         tabs = self.query_one("#inspector-tabs", TabbedContent)
 
         if tabs.active == "tab-artifacts" and self.selected_artifact_path:
