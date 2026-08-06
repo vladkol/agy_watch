@@ -238,6 +238,7 @@ class AgyWatchApp(App):
         border-right: solid $border;
         background: $background;
         padding: 0 1;
+        overflow-x: hidden;
     }
 
     #inspector-pane {
@@ -245,6 +246,7 @@ class AgyWatchApp(App):
         min-width: 40;
         padding: 0 1;
         background: $surface;
+        overflow-x: hidden;
     }
 
     .pane-title {
@@ -772,15 +774,15 @@ class AgyWatchApp(App):
             tool_name = ev.get("tool_name") or "tool"
             reason = ev.get("reason") or ""
             if decision == "DENY":
-                t.append(" 🛡️ POLICY_DENIAL: ", style="bold yellow")
+                t.append(" 🔒 POLICY_DENIAL: ", style="bold yellow")
                 t.append(f"{tool_name}", style="bold red")
                 if reason:
                     t.append(f' ("{reason[:35]}")', style="italic yellow")
             else:
-                t.append(f" 🛡️ HOOK_APPROVED: {tool_name}", style="green")
+                t.append(f" ✅ HOOK_APPROVED: {tool_name}", style="green")
         elif step_type == "PRE_TOOL_HOOK":
             tool_name = ev.get("tool_name") or "tool"
-            t.append(f" 🛡️ PRE_TOOL: {tool_name} (Evaluating policies...)", style="italic bright_black")
+            t.append(f" ⏳ PRE_TOOL: {tool_name} (Evaluating policies...)", style="italic bright_black")
         elif step_type == "TOOL_ERROR":
             tool_name = ev.get("tool_name") or "tool"
             err_msg = ev.get("error_message") or ev.get("text") or ""

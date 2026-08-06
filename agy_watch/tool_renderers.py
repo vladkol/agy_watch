@@ -986,7 +986,7 @@ def render_policy_event(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Re
     items: List[RenderableType] = []
 
     if decision == "DENY":
-        items.append(Text("🛡️ PRE-TOOL SECURITY POLICY ENFORCEMENT\n", style="bold yellow"))
+        items.append(Text("🔒 PRE-TOOL SECURITY POLICY ENFORCEMENT\n", style="bold yellow"))
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style="bold cyan", width=18)
         grid.add_column()
@@ -1000,10 +1000,10 @@ def render_policy_event(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Re
             items.append(Text("\nEvaluated Tool Arguments:", style="bold magenta"))
             items.append(Syntax(json.dumps(args_data, indent=2, default=str), "json", theme=syntax_theme, line_numbers=True, word_wrap=True))
 
-        return Panel(Group(*items), title="[bold yellow]SECURITY / POLICY INTERCEPTION[/bold yellow]", border_style="yellow")
+        return Panel(Group(*items), title="[bold yellow]SECURITY / POLICY INTERCEPTION[/bold yellow]", border_style="yellow", expand=True, padding=(0, 1))
 
     elif decision == "ALLOW":
-        items.append(Text("🛡️ LIFECYCLE HOOK: PRE_TOOL APPROVED\n", style="bold green"))
+        items.append(Text("✅ LIFECYCLE HOOK: PRE_TOOL APPROVED\n", style="bold green"))
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style="bold cyan", width=18)
         grid.add_column()
@@ -1015,11 +1015,11 @@ def render_policy_event(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Re
             items.append(Text("\nApproved Tool Arguments:", style="bold green"))
             items.append(Syntax(json.dumps(args_data, indent=2, default=str), "json", theme=syntax_theme, line_numbers=True, word_wrap=True))
 
-        return Panel(Group(*items), title="[bold green]LIFECYCLE HOOK: PRE_TOOL[/bold green]", border_style="green")
+        return Panel(Group(*items), title="[bold green]LIFECYCLE HOOK: PRE_TOOL[/bold green]", border_style="green", expand=True, padding=(0, 1))
 
     else:
         # Pending / In-flight evaluation
-        items.append(Text("🛡️ LIFECYCLE HOOK: PRE_TOOL EVALUATING\n", style="bold cyan"))
+        items.append(Text("⏳ LIFECYCLE HOOK: PRE_TOOL EVALUATING\n", style="bold cyan"))
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style="bold cyan", width=18)
         grid.add_column()
@@ -1031,7 +1031,7 @@ def render_policy_event(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Re
             items.append(Text("\nTarget Tool Arguments:", style="bold cyan"))
             items.append(Syntax(json.dumps(args_data, indent=2, default=str), "json", theme=syntax_theme, line_numbers=True, word_wrap=True))
 
-        return Panel(Group(*items), title="[bold cyan]LIFECYCLE HOOK: PRE_TOOL (EVALUATING)[/bold cyan]", border_style="cyan")
+        return Panel(Group(*items), title="[bold cyan]LIFECYCLE HOOK: PRE_TOOL (EVALUATING)[/bold cyan]", border_style="cyan", expand=True, padding=(0, 1))
 
 
 def render_tool_error(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
@@ -1057,7 +1057,7 @@ def render_tool_error(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Rend
         items.append(Text("\nTool Call Arguments:", style="bold cyan"))
         items.append(Syntax(json.dumps(args, indent=2, default=str), "json", theme=syntax_theme, line_numbers=True, word_wrap=True))
 
-    return Panel(Group(*items), title="[bold red]TOOL EXECUTION ERROR[/bold red]", border_style="red")
+    return Panel(Group(*items), title="[bold red]TOOL EXECUTION ERROR[/bold red]", border_style="red", expand=True, padding=(0, 1))
 
 
 # Registry of dedicated tool visualizers
