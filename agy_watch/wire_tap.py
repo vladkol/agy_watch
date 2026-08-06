@@ -195,6 +195,8 @@ class WireTapDB:
                 traj_id = qr.get("trajectoryId") or qr.get("trajectory_id")
             if "stepIndex" in qr or "step_index" in qr:
                 step_idx = qr.get("stepIndex") if "stepIndex" in qr else qr.get("step_index")
+        elif "callHookResponse" in payload or "call_hook_response" in payload:
+            msg_type = "POLICY_DECISION"
 
         offloaded_payload = self.blob_store.maybe_offload(payload)
         payload_json = json.dumps(offloaded_payload)

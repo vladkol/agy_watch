@@ -528,3 +528,56 @@ def test_render_custom_python_tool():
     assert "distance_km=650.0" in label
 
 
+def test_render_policy_event_and_tool_error():
+    """Verifies render_policy_event for security denials and render_tool_error for exceptions."""
+    # 1. Policy Denial Event
+    ev_policy = {
+        "step_type": "POLICY_DECISION",
+        "tool_name": "purge_cache_files",
+        "decision": "DENY",
+        "reason": "Denied by policy 'block-destructive-purge'.",
+        "tool_args": {"target_dir": "/var/log/system"},
+    }
+    rendered_policy = _render_to_string(render_tool_event(ev_policy))
+    assert "SECURITY / POLICY INTERCEPTION" in rendered_policy
+    assert "purge_cache_files" in rendered_policy
+    assert "DENY (Execution Prohibited)" in rendered_policy
+    assert "block-destructive-purge" in rendered_policy
+    assert "/var/log/system" in rendered_policy
+
+    # 2. Tool Execution Error / Exception Event
+    ev_error = {
+        "step_type": "TOOL_ERROR",
+        "tool_name": "failing_database_query",
+        "error_message": "FATAL: database 'prod_analytics' at 10.0.4.12:5432 connection refused (OOMKilled)",
+        "tool_args": {"query": "SELECT * FROM users;"},
+    }
+    rendered_err = _render_to_string(render_tool_event(ev_error))
+    assert "TOOL EXECUTION ERROR" in rendered_err
+    assert "failing_database_query" in rendered_err
+    assert "FATAL: database 'prod_analytics'" in rendered_err
+    assert "SELECT * FROM users;" in rendered_err
+
+    # 3. Pending Pre-Tool Hook Evaluation (no decision yet)
+    ev_pending = {
+        "step_type": "PRE_TOOL_HOOK",
+        "tool_name": "purge_cache_files",
+        "tool_args": {"target_dir": "/var/log/system"},
+    }
+    rendered_pending = _render_to_string(render_tool_event(ev_pending))
+    assert "LIFECYCLE HOOK: PRE_TOOL (EVALUATING)" in rendered_pending
+    assert "Evaluating Security Policies" in rendered_pending
+    assert "purge_cache_files" in rendered_pending
+
+    # 4. Approved Pre-Tool Hook (decision == ALLOW)
+    ev_allow = {
+        "step_type": "POLICY_DECISION",
+        "tool_name": "failing_database_query",
+        "decision": "ALLOW",
+        "tool_args": {"query": "SELECT 1;"},
+    }
+    rendered_allow = _render_to_string(render_tool_event(ev_allow))
+    assert "LIFECYCLE HOOK: PRE_TOOL APPROVED" in rendered_allow
+    assert "ALLOW (Approved by Policy)" in rendered_allow
+
+

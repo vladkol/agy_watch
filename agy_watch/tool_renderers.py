@@ -958,6 +958,108 @@ def render_generic_tool(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Re
     return Panel(Group(*items), title=f"[bold yellow]TOOL: {tool_name}[/bold yellow]", border_style="yellow")
 
 
+def render_policy_event(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
+    """Renders lifecycle hook decisions, pre-tool evaluations, and security policy block banners."""
+    payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+    chr_req = payload.get("callHookRequest") or payload.get("call_hook_request") or {}
+    chr_resp = payload.get("callHookResponse") or payload.get("call_hook_response") or {}
+    pre_result = chr_resp.get("preToolResult") or chr_resp.get("pre_tool_result") or {}
+
+    decision = ev.get("decision") or pre_result.get("decision")
+    reason = ev.get("reason") or pre_result.get("reason") or ""
+
+    tool_name = ev.get("tool_name") or ""
+    if not tool_name and chr_req:
+        pt_args = chr_req.get("preToolArgs") or chr_req.get("pre_tool_args") or {}
+        tool_name = pt_args.get("toolName") or pt_args.get("tool_name") or ""
+
+    args_data = ev.get("tool_args") or {}
+    if not args_data and chr_req:
+        pt_args = chr_req.get("preToolArgs") or chr_req.get("pre_tool_args") or {}
+        args_json = pt_args.get("argumentsJson") or pt_args.get("arguments_json")
+        if args_json:
+            try:
+                args_data = json.loads(args_json)
+            except Exception:
+                args_data = {"raw": args_json}
+
+    items: List[RenderableType] = []
+
+    if decision == "DENY":
+        items.append(Text("🛡️ PRE-TOOL SECURITY POLICY ENFORCEMENT\n", style="bold yellow"))
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan", width=18)
+        grid.add_column()
+        grid.add_row("Target Tool:", f"[bold white]{tool_name}[/bold white]" if tool_name else "Unknown Tool")
+        grid.add_row("Policy Decision:", "[bold red]DENY (Execution Prohibited)[/bold red]")
+        if reason:
+            grid.add_row("Denial Reason:", f"[bold yellow]{reason}[/bold yellow]")
+        items.append(grid)
+
+        if args_data:
+            items.append(Text("\nEvaluated Tool Arguments:", style="bold magenta"))
+            items.append(Syntax(json.dumps(args_data, indent=2, default=str), "json", theme=syntax_theme, line_numbers=True, word_wrap=True))
+
+        return Panel(Group(*items), title="[bold yellow]SECURITY / POLICY INTERCEPTION[/bold yellow]", border_style="yellow")
+
+    elif decision == "ALLOW":
+        items.append(Text("🛡️ LIFECYCLE HOOK: PRE_TOOL APPROVED\n", style="bold green"))
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan", width=18)
+        grid.add_column()
+        grid.add_row("Target Tool:", f"[bold white]{tool_name}[/bold white]" if tool_name else "All Tools")
+        grid.add_row("Hook Decision:", "[bold green]ALLOW (Approved by Policy)[/bold green]")
+        items.append(grid)
+
+        if args_data:
+            items.append(Text("\nApproved Tool Arguments:", style="bold green"))
+            items.append(Syntax(json.dumps(args_data, indent=2, default=str), "json", theme=syntax_theme, line_numbers=True, word_wrap=True))
+
+        return Panel(Group(*items), title="[bold green]LIFECYCLE HOOK: PRE_TOOL[/bold green]", border_style="green")
+
+    else:
+        # Pending / In-flight evaluation
+        items.append(Text("🛡️ LIFECYCLE HOOK: PRE_TOOL EVALUATING\n", style="bold cyan"))
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan", width=18)
+        grid.add_column()
+        grid.add_row("Target Tool:", f"[bold white]{tool_name}[/bold white]" if tool_name else "Unknown Tool")
+        grid.add_row("Status:", "[italic bright_black]Evaluating Security Policies & Pre-Tool Hooks...[/italic bright_black]")
+        items.append(grid)
+
+        if args_data:
+            items.append(Text("\nTarget Tool Arguments:", style="bold cyan"))
+            items.append(Syntax(json.dumps(args_data, indent=2, default=str), "json", theme=syntax_theme, line_numbers=True, word_wrap=True))
+
+        return Panel(Group(*items), title="[bold cyan]LIFECYCLE HOOK: PRE_TOOL (EVALUATING)[/bold cyan]", border_style="cyan")
+
+
+def render_tool_error(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
+    """Renders tool call exception details, traceback/error message, and parameters."""
+    tool_name = ev.get("tool_name") or "tool"
+    err_msg = ev.get("error_message") or ev.get("text") or "Tool execution exception occurred."
+    args = ev.get("tool_args") or {}
+
+    items: List[RenderableType] = []
+    items.append(Text("❌ TOOL EXECUTION EXCEPTION RAISED\n", style="bold red"))
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=18)
+    grid.add_column()
+    grid.add_row("Target Tool:", f"[bold yellow]{tool_name}[/bold yellow]")
+    grid.add_row("Status:", "[bold red]FAILED (Exception Raised in In-Process Tool Runner)[/bold red]")
+    items.append(grid)
+
+    items.append(Text("\nException Message / Traceback:", style="bold bright_red"))
+    items.append(Panel(Text(str(err_msg), style="bright_red"), border_style="red"))
+
+    if args:
+        items.append(Text("\nTool Call Arguments:", style="bold cyan"))
+        items.append(Syntax(json.dumps(args, indent=2, default=str), "json", theme=syntax_theme, line_numbers=True, word_wrap=True))
+
+    return Panel(Group(*items), title="[bold red]TOOL EXECUTION ERROR[/bold red]", border_style="red")
+
+
 # Registry of dedicated tool visualizers
 _TOOL_DISPATCH_TABLE = {
     "run_command": render_run_command,
@@ -998,12 +1100,23 @@ _TOOL_DISPATCH_TABLE = {
     "call_mcp_tool": render_mcp_tool,
     "custom_tool": render_custom_tool,
     "customTool": render_custom_tool,
+    "policy_decision": render_policy_event,
+    "pre_tool_hook": render_policy_event,
+    "tool_error": render_tool_error,
     "finish": render_finish,
 }
 
 
 def render_tool_event(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
-    """Master entry point for rendering tool calls, failure banners, and arguments."""
+    """Master entry point for rendering tool calls, failure banners, policy events, and arguments."""
+    step_type = ev.get("step_type")
+    msg_type = ev.get("message_type")
+
+    if step_type in ("POLICY_DECISION", "PRE_TOOL_HOOK") or msg_type in ("CALL_HOOK_PRETOOL", "POLICY_DECISION"):
+        return render_policy_event(ev, syntax_theme=syntax_theme)
+    if step_type == "TOOL_ERROR":
+        return render_tool_error(ev, syntax_theme=syntax_theme)
+
     elements: List[RenderableType] = []
 
     # 1. State / Failure / Policy Banner (if active)

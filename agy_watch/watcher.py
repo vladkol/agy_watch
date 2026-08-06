@@ -109,18 +109,25 @@ class SessionWatcher:
             except Exception:
                 payload = {}
 
-            # Buffer PreTool hook arguments to attach to subsequent tool calls
+            # Buffer PreTool hook arguments and classify PRE_TOOL_HOOK event
             if "callHookRequest" in payload or "call_hook_request" in payload:
                 chr_obj = payload.get("callHookRequest") or payload.get("call_hook_request") or {}
-                if chr_obj.get("name") == "PreTool":
-                    pt_args = chr_obj.get("preToolArgs") or chr_obj.get("pre_tool_args") or {}
-                    tool_name = pt_args.get("toolName") or pt_args.get("tool_name")
-                    args_json = pt_args.get("argumentsJson") or pt_args.get("arguments_json")
-                    if tool_name and args_json:
-                        try:
-                            self.pending_pretool_args[tool_name] = json.loads(args_json)
-                        except Exception:
-                            self.pending_pretool_args[tool_name] = args_json
+                pt_args = chr_obj.get("preToolArgs") or chr_obj.get("pre_tool_args") or {}
+                t_name = pt_args.get("toolName") or pt_args.get("tool_name")
+                args_json = pt_args.get("argumentsJson") or pt_args.get("arguments_json")
+                parsed_args = {}
+                if t_name and args_json:
+                    try:
+                        parsed_args = json.loads(args_json)
+                    except Exception:
+                        parsed_args = {"raw": args_json}
+                    self.pending_pretool_args[t_name] = parsed_args
+                event["step_type"] = "PRE_TOOL_HOOK"
+                event["tool_name"] = t_name
+                event["tool_args"] = parsed_args
+                new_events.append(event)
+                self.all_events.append(event)
+                continue
 
             sub_id = traj_id if (not is_main and traj_id) else None
             if sub_id:
@@ -170,17 +177,35 @@ class SessionWatcher:
 
             if "toolResponse" in payload or "tool_response" in payload:
                 tr_obj = payload.get("toolResponse") or payload.get("tool_response") or {}
-                event["step_type"] = "TOOL_RESPONSE"
                 event["tool_id"] = tr_obj.get("id")
                 resp_json = tr_obj.get("responseJson") or tr_obj.get("response_json")
-                event["text"] = resp_json or tr_obj.get("response") or ""
+                err_msg = tr_obj.get("errorMessage") or tr_obj.get("error_message") or tr_obj.get("error")
+
                 for prev_ev in reversed(self.all_events):
                     if prev_ev.get("tool_id") == event["tool_id"]:
+                        event["tool_name"] = prev_ev.get("tool_name")
+                        event["tool_args"] = prev_ev.get("tool_args")
                         if isinstance(prev_ev.get("payload"), dict):
                             if "stepUpdate" not in prev_ev["payload"] or not isinstance(prev_ev["payload"]["stepUpdate"], dict):
                                 prev_ev["payload"]["stepUpdate"] = {}
-                            prev_ev["payload"]["stepUpdate"]["responseJson"] = resp_json
+                            if resp_json:
+                                prev_ev["payload"]["stepUpdate"]["responseJson"] = resp_json
+                            if err_msg:
+                                prev_ev["payload"]["stepUpdate"]["error"] = {"errorMessage": err_msg}
+                                prev_ev["state"] = "STATE_ERROR"
+                                prev_ev["error"] = {"errorMessage": err_msg}
                         break
+
+                if err_msg:
+                    event["step_type"] = "TOOL_ERROR"
+                    event["state"] = "STATE_ERROR"
+                    event["error"] = {"errorMessage": err_msg}
+                    event["error_message"] = err_msg
+                    event["text"] = err_msg
+                else:
+                    event["step_type"] = "TOOL_RESPONSE"
+                    event["text"] = resp_json or tr_obj.get("response") or ""
+
                 new_events.append(event)
                 self.all_events.append(event)
                 continue
@@ -197,6 +222,26 @@ class SessionWatcher:
                         event["prompt"] = " ".join(text_parts)
                     else:
                         event["prompt"] = payload.get("prompt") or payload.get("content")
+                elif msg_type == "POLICY_DECISION" or "callHookResponse" in payload or "call_hook_response" in payload:
+                    event["step_type"] = "POLICY_DECISION"
+                    chr_resp = payload.get("callHookResponse") or payload.get("call_hook_response") or {}
+                    pre_res = chr_resp.get("preToolResult") or chr_resp.get("pre_tool_result") or {}
+                    decision = pre_res.get("decision", "ALLOW")
+                    reason = pre_res.get("reason", "")
+                    event["decision"] = decision
+                    event["reason"] = reason
+                    if decision == "DENY":
+                        event["state"] = "STATE_ERROR"
+
+                    for prev_ev in reversed(self.all_events):
+                        if prev_ev.get("step_type") == "PRE_TOOL_HOOK" or prev_ev.get("message_type") == "CALL_HOOK_PRETOOL":
+                            event["tool_name"] = prev_ev.get("tool_name")
+                            event["tool_args"] = prev_ev.get("tool_args")
+                            prev_ev["decision"] = decision
+                            prev_ev["reason"] = reason
+                            if decision == "DENY":
+                                prev_ev["state"] = "STATE_ERROR"
+                            break
                 elif msg_type == "USER_ANSWER" or "questionResponse" in payload or "question_response" in payload:
                     event["step_type"] = "USER_ANSWER"
                     qr = payload.get("questionResponse") or payload.get("question_response") or {}

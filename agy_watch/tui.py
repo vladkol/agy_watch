@@ -767,6 +767,28 @@ class AgyWatchApp(App):
             t.append(" 💬 USER_ANSWER: ", style="bold bright_green")
             ans_str = ev.get('text') or ev.get('prompt') or ""
             t.append(f'"{ans_str[:40]}"', style="bright_green")
+        elif step_type == "POLICY_DECISION":
+            decision = ev.get("decision", "ALLOW")
+            tool_name = ev.get("tool_name") or "tool"
+            reason = ev.get("reason") or ""
+            if decision == "DENY":
+                t.append(" 🛡️ POLICY_DENIAL: ", style="bold yellow")
+                t.append(f"{tool_name}", style="bold red")
+                if reason:
+                    t.append(f' ("{reason[:35]}")', style="italic yellow")
+            else:
+                t.append(f" 🛡️ HOOK_APPROVED: {tool_name}", style="green")
+        elif step_type == "PRE_TOOL_HOOK":
+            tool_name = ev.get("tool_name") or "tool"
+            t.append(f" 🛡️ PRE_TOOL: {tool_name} (Evaluating policies...)", style="italic bright_black")
+        elif step_type == "TOOL_ERROR":
+            tool_name = ev.get("tool_name") or "tool"
+            err_msg = ev.get("error_message") or ev.get("text") or ""
+            t.append(" ❌ TOOL_ERROR: ", style="bold red")
+            t.append(f"{tool_name}", style="bold yellow")
+            if err_msg:
+                first_line = str(err_msg).strip().splitlines()[0]
+                t.append(f' ("{first_line[:35]}")', style="italic bright_red")
         elif step_type == "SUBAGENT_PROMPT":
             t.append(" SUBAGENT_PROMPT: ", style="bold green")
             t.append(f"{(ev.get('prompt') or '')[:35]}...", style="green")
@@ -847,16 +869,22 @@ class AgyWatchApp(App):
             p_title.display = False
             p_area.display = False
 
-        # 2. Tool Visualizer Card
-        if tool_name or ev.get("step_type") == "TOOL_CALL":
+        # 2. Tool / Policy / Exception Visualizer Card
+        is_tool_or_policy = (
+            bool(tool_name)
+            or ev.get("step_type") in ("TOOL_CALL", "TOOL_ERROR", "POLICY_DECISION", "PRE_TOOL_HOOK")
+            or ev.get("message_type") in ("CALL_HOOK_PRETOOL", "POLICY_DECISION")
+        )
+        if is_tool_or_policy:
             tool_card_renderable = render_tool_event(ev, syntax_theme=self.settings.syntax_theme)
             t_card.display = True
             t_card.update(tool_card_renderable)
         else:
             t_card.display = False
 
-        # 3. Model Text Response
-        if ev.get("text") and not tool_name:
+        # 3. Model Text Response (only for actual model output, not tool errors/policies)
+        is_model_text = bool(ev.get("text")) and not is_tool_or_policy and ev.get("step_type") not in ("TOOL_RESPONSE", "TOOL_ERROR")
+        if is_model_text:
             resp_title.display = True
             resp_title.update("─── MODEL RESPONSE (Selectable) ───")
             resp_area.display = True
