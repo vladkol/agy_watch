@@ -17,25 +17,22 @@ Whether you are debugging multi-agent coordination, inspecting subagent prompts,
 ![TUI Screenshot](docs/images/screenshot.jpg)
 
 ### Core Capabilities
-1. **Zero-Code Wire-Tap**: Non-intrusively captures all inbound and outbound IPC frames between the Python SDK and the `localharness` runtime without requiring any changes to your agent code.
-2. **Interactive TUI Dashboard**: A 3-pane terminal console built with [Textual](https://textual.textualize.io/) and [Rich](https://rich.readthedocs.io/) to monitor live sessions, explore recursive sub-agent trees, and inspect code diffs and media files with syntax highlighting.
-3. **First-Class Tool Support**: Dedicated rich renderers for in-process Python callable functions, Model Context Protocol (MCP) stdio servers, standard SDK tools, and subagent spawning.
-4. **Machine-Wide Session Registry**: Automatically tracks, indexes, and monitors all agent runs across your machine with zero-configuration discovery and process liveness checks.
-5. **Scriptable CLI**: Non-interactive subcommands (`list`, `tail -f`, `inspect`) with JSON, YAML, and formatted table outputs for scripting, terminal piping, and automated evaluations.
+1. **Zero-Code Agent Observability**: Monitor live agent execution without modifying a single line of your codebase. Hook into active virtual environments or standalone binaries with one command.
+2. **Multi-Agent Swarm Tracking**: Visualize concurrent subagent workflows in a structured, hierarchical tree—tracking delegated instructions, worker reasoning, and nested tool calls in context.
+3. **End-to-End Tool & Policy Inspection**: Inspect complete input arguments, execution outputs, runtime exceptions, and security policy interceptions for standard SDK tools, custom Python functions, and MCP servers.
+4. **Live Workspace & Artifact Preview**: Review generated files, unified code diffs, markdown reports, and media assets in real time directly inside the terminal.
+5. **Machine-Wide Discovery & Scriptable CLI**: Track all local agent sessions from a unified dashboard, or stream structured JSON events into terminal pipelines and evaluation scripts.
 
 ---
 
 ## Key Features
 
-* **Zero-Lock Real-Time Streaming**: Powered by SQLite Write-Ahead Logging (`PRAGMA journal_mode=WAL;`) and incremental sequence cursors, delivering instant updates with zero lock contention against running agents.
-* **Hierarchical Recursive Sub-Agent Tree**: Automatically maps concurrent subagents (`invoke_subagent`), tool dispatches, and model reasoning into clean, expandable and collapsible tree branches.
-* **Correlated Tool Arguments**: Pairs pre-tool hooks (`CALL_HOOK_PRETOOL`) with active tool calls, providing complete visibility into worker prompts, subagent roles, and tool parameters.
-* **Dedicated Custom & MCP Tool Renderers**: Color-coded, structured visualization for Python function calls and Model Context Protocol (MCP) tools with transport badges and parameter tables.
-* **Master-Detail In-Terminal Artifact Preview**: Live syntax-highlighted previewer for Python, HTML, TypeScript, JSON, YAML, Shell, SQL, Markdown, and media assets (`.png`, `.jpg`, `.mp4`).
-* **Multimodal Brain Storage Discovery**: Automatically locates and surfaces generated images, diagrams, and files from local workspaces and shared Antigravity brain storage.
-* **Full-Screen Syntax Reader**: Press `f` or `Enter` to read prompts, reasoning traces, and code diffs in a dedicated full-screen viewer with paired syntax highlighting and toggleable word wrapping (`w`).
-* **OS-Native Locale & Clock Formatting**: Dynamically detects system locale conventions (such as macOS `AppleLocale` and 12-hour/24-hour preferences) with 2-digit year representations.
-* **Persistent User Preferences**: Automatically remembers your preferred app theme, syntax palette, view mode (`tree` vs `flat`), active inspector tab, and text wrapping across restarts.
+* **Hierarchical Execution Tree**: Automatically groups root agent and subagent lifecycles into collapsible branches, giving you immediate clarity on which agent performed which action.
+* **First-Class Visualizers for Common Tools**: Dedicated, human-readable visualizers for shell commands (with exit codes), file edits (with syntax-colored unified diffs), image generation, interactive user questions, MCP servers, and custom Python callables.
+* **Security Policy & Error Interception**: Clearly identifies blocked actions, policy denial reasons, and tool runtime exceptions with prominent diagnostic cards.
+* **In-Terminal Artifact & Diff Viewer**: Instant syntax-highlighted previews for code, markdown, and images as soon as agents create or update them in their workspace.
+* **Real-Time Live Streaming & Follow Mode**: Watch thoughts, streaming tokens, and execution steps render live as the model generates them, with auto-scroll and pause controls.
+* **Non-Interactive CLI for Tooling**: Query past runs, tail active sessions, and inspect step payloads in JSON or YAML format for automated benchmarking and CI/CD pipelines.
 
 ---
 
