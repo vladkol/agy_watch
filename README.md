@@ -104,7 +104,9 @@ agy_watch unwatch
 
 ### 2. Universal Non-Python & Standalone Agents (`proxy-path`)
 
-For agents written in **Node.js/TypeScript, Go, Rust, Java**, or standalone binary scripts:
+For non-Python agents (once they exist!) or standalone agents:
+
+**Assuming they check `ANTIGRAVITY_HARNESS_PATH` as Python SDK does**:
 
 ```bash
 # Run any agent through the universal harness proxy
