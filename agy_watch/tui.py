@@ -64,36 +64,134 @@ def open_media_file_cross_platform(file_path: str) -> bool:
         return False
 
 
-def get_syntax_lexer_for_path(file_path: str) -> str:
-    """Infers Textual/Rich syntax language identifier from filename extension."""
+def detect_content_language(content: Optional[str]) -> str:
+    """Infers best syntax highlighter from text content heuristics."""
+    if not content:
+        return "markdown"
+    s = content.strip()
+    if not s:
+        return "markdown"
+
+    # 1. JSON detection
+    if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+        try:
+            import json
+            json.loads(s)
+            return "json"
+        except Exception:
+            pass
+
+    lines = s.splitlines()[:25]
+
+    # 2. Shell script detection
+    if s.startswith("#!") or any(l.lstrip().startswith(("export ", "echo ", "source ", "set -e", "chmod ")) for l in lines[:5]):
+        return "bash"
+
+    # 3. Python detection
+    if any(l.lstrip().startswith(("def ", "class ", "import ", "from ", "async def ", "if __name__ ==", "@dataclass", "@pytest")) for l in lines[:10]):
+        return "python"
+
+    # 4. XML / HTML detection
+    if s.startswith("<") and s.endswith(">") and ("</" in s or "/>" in s):
+        return "html"
+
+    # 5. YAML detection
+    if s.startswith("---") or any(l.startswith("apiVersion:") or l.startswith("kind:") for l in lines[:5]):
+        return "yaml"
+
+    # 6. SQL detection
+    if any(l.lstrip().upper().startswith(("SELECT ", "INSERT INTO ", "UPDATE ", "CREATE TABLE ", "DELETE FROM ", "WITH ")) for l in lines[:5]):
+        return "sql"
+
+    # Default for text and notes: markdown provides rich syntax coloring for headers, lists, code, URLs, bold
+    return "markdown"
+
+
+def get_syntax_lexer_for_path(file_path: str, content: Optional[str] = None) -> str:
+    """Infers Textual/Rich syntax language identifier from filename extension and content."""
     if not file_path:
-        return "text"
+        return detect_content_language(content) if content else "markdown"
+
+    base = os.path.basename(file_path).lower()
+    if base in ("dockerfile", "containerfile", "makefile", "gnumakefile"):
+        return "bash"
+    if base.startswith(".env"):
+        return "bash"
+
     _, ext = os.path.splitext(file_path.lower())
     mapping = {
         ".py": "python",
+        ".pyi": "python",
+        ".pyw": "python",
         ".json": "json",
+        ".jsonl": "json",
         ".js": "javascript",
+        ".mjs": "javascript",
+        ".cjs": "javascript",
         ".ts": "typescript",
+        ".mts": "typescript",
+        ".cts": "typescript",
+        ".tsx": "tsx",
+        ".jsx": "jsx",
         ".html": "html",
+        ".htm": "html",
+        ".xhtml": "html",
         ".css": "css",
+        ".scss": "css",
+        ".sass": "css",
+        ".less": "css",
         ".sh": "bash",
         ".zsh": "bash",
         ".bash": "bash",
         ".yaml": "yaml",
         ".yml": "yaml",
         ".toml": "toml",
-        ".tsx": "tsx",
-        ".jsx": "jsx",
         ".md": "markdown",
+        ".markdown": "markdown",
+        ".rst": "markdown",
         ".sql": "sql",
         ".go": "go",
         ".rs": "rust",
         ".cpp": "cpp",
+        ".cc": "cpp",
+        ".cxx": "cpp",
+        ".hpp": "cpp",
+        ".h": "c",
         ".c": "c",
         ".java": "java",
-        ".txt": "text",
+        ".xml": "xml",
+        ".svg": "xml",
+        ".regex": "regex",
     }
-    return mapping.get(ext, "text")
+    if ext in mapping:
+        return mapping[ext]
+
+    if content:
+        return detect_content_language(content)
+
+    return "markdown"
+
+
+def _get_safe_text_area_theme(theme_name: Optional[str]) -> str:
+    """Maps arbitrary application/Rich syntax themes to a valid Textual TextArea builtin theme."""
+    if not theme_name:
+        return "dracula"
+    t = theme_name.lower()
+    mapping = {
+        "dracula": "dracula",
+        "monokai": "monokai",
+        "nord": "dracula",
+        "tokyo-night": "dracula",
+        "catppuccin-mocha": "vscode_dark",
+        "one-dark": "vscode_dark",
+        "gruvbox": "monokai",
+        "solarized-dark": "vscode_dark",
+        "github_light": "github_light",
+        "light": "github_light",
+        "textual-dark": "dracula",
+        "vscode_dark": "vscode_dark",
+    }
+    return mapping.get(t, "dracula")
 
 
 _guess_syntax_language = get_syntax_lexer_for_path
@@ -189,6 +287,9 @@ class SelectableTextArea(TextArea):
         await super()._on_key(event)
 
 
+READER_LANGUAGES: List[str] = ["markdown", "python", "json", "yaml", "bash", "sql", "html", "css", "xml", "go", "rust", "text"]
+
+
 class FullscreenReaderModal(ModalScreen):
     """Full-screen modal for reading files and prompt traces with selectable TextArea and syntax highlighting."""
 
@@ -196,6 +297,7 @@ class FullscreenReaderModal(ModalScreen):
         Binding("escape", "dismiss", "Close", show=True, priority=True),
         Binding("q", "dismiss", "Close", show=True, priority=True),
         Binding("w", "toggle_wrap", "Toggle Wrap", show=True, priority=True),
+        Binding("l", "cycle_language", "Syntax", show=True, priority=True),
         Binding("a", "select_all_modal", "Select All", show=True, priority=True),
         Binding("ctrl+a", "select_all_modal", "Select All", show=False, priority=True),
         Binding("c", "copy_modal_content", "Copy", show=True, priority=True),
@@ -216,26 +318,29 @@ class FullscreenReaderModal(ModalScreen):
         self.raw_content = content
         self.file_path = file_path
         self.is_markdown = is_markdown
-        self.syntax_theme = syntax_theme
+        self.syntax_theme = _get_safe_text_area_theme(syntax_theme)
         self.wrap_mode = wrap_mode
         self.text_content = ""
-        self.lang = "text"
+        self.lang = "markdown"
 
         if self.file_path and os.path.exists(self.file_path):
             try:
                 with open(self.file_path, "r", encoding="utf-8", errors="replace") as f:
                     self.text_content = f.read()
-                self.lang = get_syntax_lexer_for_path(self.file_path)
+                self.lang = get_syntax_lexer_for_path(self.file_path, self.text_content)
             except Exception as e:
                 self.text_content = f"Error reading file: {e}"
         elif self.raw_content is not None:
             self.text_content = self.raw_content
-            if self.is_markdown:
-                self.lang = "markdown"
+            self.lang = "markdown" if self.is_markdown else detect_content_language(self.text_content)
+
+    def _build_header_text(self) -> str:
+        lang_badge = f"[{self.lang.upper()}]"
+        return f" [bold white]═══ {self.reader_title} {lang_badge} ═══[/bold white] (Press ESC/Q to close, L to change syntax, W to wrap, click & drag to select, A / Ctrl+A to select all, C / Ctrl+C to copy)"
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-container"):
-            yield Static(f" [bold white]═══ {self.reader_title} ═══[/bold white] (Press ESC/Q to close, W to wrap, click & drag to select text, C / Ctrl+C to copy, A / Ctrl+A to select all)", id="modal-header")
+            yield Static(self._build_header_text(), id="modal-header")
             yield SelectableTextArea(
                 self.text_content,
                 language=self.lang,
@@ -259,6 +364,19 @@ class FullscreenReaderModal(ModalScreen):
         ta = self.query_one("#modal-text-area", TextArea)
         ta.soft_wrap = self.wrap_mode
         self.notify(f"Soft Wrap: {'Enabled' if self.wrap_mode else 'Disabled'}")
+
+    def action_cycle_language(self) -> None:
+        """Cycles through available syntax highlighting modes in fullscreen viewer."""
+        current = self.lang
+        idx = READER_LANGUAGES.index(current) if current in READER_LANGUAGES else 0
+        self.lang = READER_LANGUAGES[(idx + 1) % len(READER_LANGUAGES)]
+        ta = self.query_one("#modal-text-area", TextArea)
+        try:
+            ta.language = self.lang
+        except Exception:
+            pass
+        self.query_one("#modal-header", Static).update(self._build_header_text())
+        self.notify(f"Syntax Highlighting: {self.lang.upper()}")
 
     def action_select_all_modal(self) -> None:
         """Selects all content in modal text area."""
