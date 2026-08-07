@@ -301,7 +301,7 @@ class WireTapDB:
                 self.status = "STATE_CANCELLED"
             elif tsu_state in ("STATE_ERROR", "ERROR", 4):
                 self.status = "STATE_ERROR"
-            elif tsu_state in ("STATE_DONE", "DONE", 2):
+            elif tsu_state in ("STATE_DONE", "DONE", "STATE_FULLY_IDLE", 2):
                 self.status = "STATE_DONE"
             elif tsu_state in ("STATE_RUNNING", "RUNNING", 1):
                 self.status = "STATE_RUNNING"
@@ -333,7 +333,9 @@ class WireTapDB:
             if is_main and state:
                 if state == "STATE_ERROR":
                     self.status = "STATE_ERROR"
-                elif self.status not in ("STATE_CANCELLED", "STATE_ERROR", "STATE_DONE"):
+                elif state == "STATE_DONE":
+                    self.status = "STATE_DONE"
+                elif state in ("STATE_ACTIVE", "STATE_RUNNING"):
                     self.status = "STATE_ACTIVE"
 
             if step_idx is not None and is_main:
