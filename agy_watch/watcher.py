@@ -82,7 +82,7 @@ class SessionWatcher:
             SELECT session_id, cascade_id, title, status, total_tokens, prompt_tokens,
                    candidates_tokens, thoughts_tokens, cached_tokens, subagent_count, step_count
             FROM session_meta
-            ORDER BY (session_id = cascade_id) DESC, updated_at ASC LIMIT 1;
+            ORDER BY (session_id = cascade_id) DESC, updated_at DESC LIMIT 1;
             """)
             meta_row = cur.fetchone()
             if meta_row:
@@ -120,8 +120,14 @@ class SessionWatcher:
                 payload = {}
 
             # Infer subagent status from trajectory_id
-            if traj_id and self.session_id and traj_id != self.session_id:
-                is_main = 0
+            su = payload.get("stepUpdate") or payload.get("step_update") or payload.get("trajectoryStateUpdate") or payload.get("trajectory_state_update") or {}
+            row_traj = su.get("trajectoryId") or su.get("trajectory_id") or traj_id
+            traj_id = row_traj
+
+            if traj_id and self.session_id:
+                is_main = bool(traj_id == self.session_id)
+            else:
+                is_main = bool(is_main)
 
             sub_id = traj_id if (not is_main and traj_id) else None
             if sub_id:
@@ -719,56 +725,28 @@ class SessionWatcher:
                                 tc_ev["subagent_id"] = traj_id
                                 self.session_info["subagents"].add(traj_id)
 
-                                # Correlate back to preceding unmatched hook events
-                                curr_target = raw_args.get("TargetFile") or raw_args.get("filePath") or raw_args.get("target_file") or raw_args.get("targetFile") or raw_args.get("CommandLine") or raw_args.get("command") or raw_args.get("ImageName") or ""
-                                curr_norm_target = os.path.basename(str(curr_target).replace("file://", ""))
+                            # Correlate back to preceding unmatched hook events
+                            curr_target = raw_args.get("TargetFile") or raw_args.get("filePath") or raw_args.get("target_file") or raw_args.get("targetFile") or raw_args.get("CommandLine") or raw_args.get("command") or raw_args.get("ImageName") or ""
+                            curr_norm_target = os.path.basename(str(curr_target).replace("file://", ""))
 
-                                FILE_TOOLS = {"create_file", "edit_file", "write_to_file", "view_file"}
-                                for prev in reversed(self.all_events):
-                                    if prev.get("step_type") in ("PRE_TOOL_HOOK", "POLICY_DECISION", "PRE_TURN_HOOK") and prev.get("is_main"):
-                                        p_args = prev.get("tool_args") or {}
-                                        p_target = p_args.get("TargetFile") or p_args.get("filePath") or p_args.get("target_file") or p_args.get("CommandLine") or p_args.get("ImageName") or ""
-                                        p_norm_target = os.path.basename(str(p_target).replace("file://", ""))
+                            FILE_TOOLS = {"create_file", "edit_file", "write_to_file", "view_file"}
+                            for prev in reversed(self.all_events):
+                                if prev.get("step_type") in ("PRE_TOOL_HOOK", "POLICY_DECISION", "PRE_TURN_HOOK") and not prev.get("_matched_tool"):
+                                    p_args = prev.get("tool_args") or {}
+                                    p_target = p_args.get("TargetFile") or p_args.get("filePath") or p_args.get("target_file") or p_args.get("CommandLine") or p_args.get("ImageName") or ""
+                                    p_norm_target = os.path.basename(str(p_target).replace("file://", ""))
 
-                                        target_match = bool(curr_norm_target and p_norm_target and (curr_norm_target == p_norm_target))
-                                        p_tool = prev.get("tool_name") or ""
-                                        c_tool = tc_ev.get("tool_name") or ""
-                                        tool_match = (p_tool == c_tool) or (p_tool in FILE_TOOLS and c_tool in FILE_TOOLS)
+                                    target_match = bool(curr_norm_target and p_norm_target and (curr_norm_target == p_norm_target))
+                                    p_tool = prev.get("tool_name") or ""
+                                    c_tool = tc_ev.get("tool_name") or ""
+                                    tool_match = (p_tool == c_tool) or (p_tool in FILE_TOOLS and c_tool in FILE_TOOLS)
 
-                                        if target_match or (tool_match and not p_norm_target and not curr_norm_target):
-                                            prev["is_main"] = False
-                                            prev["trajectory_id"] = traj_id
-                                            prev["subagent_id"] = traj_id
-
-                            tc_ev["artifacts"] = self._extract_event_artifacts(tc_ev)
-                            new_events.append(tc_ev)
-                            self.all_events.append(tc_ev)
-                            break
-
-                            if not is_main and traj_id:
-                                tc_ev["subagent_id"] = traj_id
-                                self.session_info["subagents"].add(traj_id)
-
-                                # Correlate back to preceding unmatched hook events
-                                curr_target = raw_args.get("TargetFile") or raw_args.get("filePath") or raw_args.get("target_file") or raw_args.get("targetFile") or raw_args.get("CommandLine") or raw_args.get("command") or raw_args.get("ImageName") or ""
-                                curr_norm_target = os.path.basename(str(curr_target).replace("file://", ""))
-
-                                FILE_TOOLS = {"create_file", "edit_file", "write_to_file", "view_file"}
-                                for prev in reversed(self.all_events):
-                                    if prev.get("step_type") in ("PRE_TOOL_HOOK", "POLICY_DECISION") and prev.get("is_main"):
-                                        p_args = prev.get("tool_args") or {}
-                                        p_target = p_args.get("TargetFile") or p_args.get("filePath") or p_args.get("target_file") or p_args.get("CommandLine") or p_args.get("ImageName") or ""
-                                        p_norm_target = os.path.basename(str(p_target).replace("file://", ""))
-
-                                        target_match = bool(curr_norm_target and p_norm_target and (curr_norm_target == p_norm_target))
-                                        p_tool = prev.get("tool_name") or ""
-                                        c_tool = tc_ev.get("tool_name") or ""
-                                        tool_match = (p_tool == c_tool) or (p_tool in FILE_TOOLS and c_tool in FILE_TOOLS)
-
-                                        if target_match or (tool_match and not p_norm_target and not curr_norm_target):
-                                            prev["is_main"] = False
-                                            prev["trajectory_id"] = traj_id
-                                            prev["subagent_id"] = traj_id
+                                    if target_match or (tool_match and not p_norm_target and not curr_norm_target) or tool_match:
+                                        prev["is_main"] = is_main
+                                        prev["trajectory_id"] = traj_id
+                                        prev["subagent_id"] = traj_id if not is_main else None
+                                        prev["_matched_tool"] = True
+                                        break
 
                             tc_ev["artifacts"] = self._extract_event_artifacts(tc_ev)
                             new_events.append(tc_ev)

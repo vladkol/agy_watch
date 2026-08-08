@@ -188,6 +188,93 @@ def test_list_dir_and_search_dir_rendering():
     assert "42" in rendered_search
 
 
+def test_jsonl_grep_search_and_list_dir_rendering():
+    """Verifies that grep_search and list_dir output formatted as newline-delimited JSON or raw text is correctly parsed into tables."""
+    # 1. JSONL Grep Search Result
+    grep_raw_text = """Created At: 2026-08-07T16:26:47-07:00
+Completed At: 2026-08-07T16:26:47-07:00
+{"File":"/Users/vladkol/antigravity-sdk-agent/agy_watch/tui.py","LineNumber":1335,"LineContent":" def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:"}
+{"File":"/Users/vladkol/antigravity-sdk-agent/agy_watch/tui.py","LineNumber":1371,"LineContent":" def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:"}
+"""
+    ev_grep_jsonl = {
+        "tool_name": "grep_search",
+        "action_type": "grep_search",
+        "tool_args": {"Query": "on_tree", "SearchPath": "/Users/vladkol/antigravity-sdk-agent/agy_watch/tui.py"},
+        "text": grep_raw_text,
+        "state": "STATE_DONE",
+    }
+    rendered_grep = _render_to_string(render_tool_event(ev_grep_jsonl))
+    assert "SEARCH DIRECTORY (GREP)" in rendered_grep
+    assert 'Search Query: "on_tree"' in rendered_grep
+    assert "tui.py" in rendered_grep
+    assert "1335" in rendered_grep
+    assert "on_tree_node_selected" in rendered_grep
+    assert "1371" in rendered_grep
+    assert "on_tree_node_highlighted" in rendered_grep
+
+    # 2. JSONL Directory Listing Result
+    list_raw_text = """Created At: 2026-08-03T15:34:42-07:00
+Completed At: 2026-08-03T15:34:42-07:00
+{"name":".DS_Store", "sizeBytes":"8196"}
+{"name":".cache", "isDir":true}
+{"name":".git", "isDir":true}
+{"name":"README.md", "sizeBytes":"1024"}
+"""
+    ev_list_jsonl = {
+        "tool_name": "list_dir",
+        "action_type": "list_dir",
+        "tool_args": {"DirectoryPath": "/workspace"},
+        "text": list_raw_text,
+        "state": "STATE_DONE",
+    }
+    rendered_list = _render_to_string(render_tool_event(ev_list_jsonl))
+    assert "DIRECTORY LISTING" in rendered_list
+    assert "README.md" in rendered_list
+    assert "1.0 KB" in rendered_list
+    assert ".cache" in rendered_list
+    assert "DIR" in rendered_list
+
+    # 3. Raw Text Find Files
+    find_raw_text = """Created At: 2026-08-07T12:00:00Z
+Completed At: 2026-08-07T12:00:01Z
+/workspace/src/agent.py
+/workspace/src/utils.py
+"""
+    ev_find = {
+        "tool_name": "find_by_name",
+        "action_type": "find_by_name",
+        "tool_args": {"Pattern": "*.py", "SearchDirectory": "/workspace"},
+        "text": find_raw_text,
+        "state": "STATE_DONE",
+    }
+    rendered_find = _render_to_string(render_tool_event(ev_find))
+    assert "FIND FILES" in rendered_find
+    assert "/workspace/src/agent.py" in rendered_find
+    assert "/workspace/src/utils.py" in rendered_find
+
+    # 4. SDK Search Directory Event with plain text description (regression for NameError 're')
+    ev_sdk_search = {
+        "tool_name": "search_directory",
+        "action_type": "search_directory",
+        "tool_args": {
+            "Query": "fetch_unstructured_meeting_notes",
+            "SearchPath": "/workspace",
+            "query": "fetch_unstructured_meeting_notes",
+            "numResults": 0,
+        },
+        "payload": {
+            "stepUpdate": {
+                "text": "Search repo for meeting notes references",
+                "state": "STATE_DONE",
+            }
+        },
+        "state": "STATE_DONE",
+    }
+    rendered_sdk = _render_to_string(render_tool_event(ev_sdk_search))
+    assert "SEARCH DIRECTORY (GREP)" in rendered_sdk
+    assert "No matches found." in rendered_sdk
+
+
 def test_invoke_subagent_rendering():
     """Verifies invoke_subagent worker delegation cards."""
     ev = {

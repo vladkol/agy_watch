@@ -551,9 +551,8 @@ def extract_event_artifacts(
 
     Searches:
     - Active workspace directory
-    - Global SDK brain storage:
+    - Global Antigravity brain storage:
       ~/.gemini/antigravity/brain/
-      ~/.gemini/jetski/brain/
       ~/.antigravity/brain/
     """
     artifacts: List[Dict[str, Any]] = []
@@ -599,14 +598,12 @@ def extract_event_artifacts(
 
         # Search roots: SDK brain paths + workspace dirs
         found_matches: List[str] = []
+        from agy_watch.brain_watcher import get_all_gemini_brain_dirs
+        all_brain_dirs = get_all_gemini_brain_dirs()
 
         # 1. First priority: session-specific brain directory
         if session_id:
-            for brain_root in (
-                os.path.expanduser("~/.gemini/antigravity/brain"),
-                os.path.expanduser("~/.gemini/jetski/brain"),
-                os.path.expanduser("~/.antigravity/brain"),
-            ):
+            for brain_root in all_brain_dirs:
                 session_dir = os.path.join(brain_root, session_id)
                 if os.path.isdir(session_dir):
                     pattern = os.path.join(session_dir, "**", f"*{img_name}*") if img_name else os.path.join(session_dir, "**", "*")
@@ -616,11 +613,7 @@ def extract_event_artifacts(
 
         # 2. Fallback: search all brain roots + workspace dirs
         if not found_matches:
-            search_roots = [
-                os.path.expanduser("~/.gemini/antigravity/brain"),
-                os.path.expanduser("~/.gemini/jetski/brain"),
-                os.path.expanduser("~/.antigravity/brain"),
-            ]
+            search_roots = list(all_brain_dirs)
             if workspace_dir:
                 search_roots.extend([
                     os.path.join(workspace_dir, "brain"),
@@ -662,6 +655,13 @@ def extract_event_artifacts(
             matched_path = match.group(2)
             add_file_if_valid(matched_path, "image")
 
+    # 4. Check for file:/// markdown links or raw file paths
+    file_pattern = re.compile(r"file://(/[^\s\)\`\"']+)")
+    for c in content_strings:
+        for match in file_pattern.finditer(c):
+            matched_path = match.group(1)
+            add_file_if_valid(matched_path)
+
     return artifacts
 
 
@@ -674,7 +674,12 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    cursor.execute("SELECT session_id, cascade_id, title, status, total_tokens, prompt_tokens, candidates_tokens, thoughts_tokens, cached_tokens, subagent_count, step_count FROM session_meta ORDER BY updated_at DESC LIMIT 1")
+    cursor.execute("""
+        SELECT session_id, cascade_id, title, status, total_tokens, prompt_tokens, candidates_tokens, thoughts_tokens, cached_tokens, subagent_count, step_count 
+        FROM session_meta 
+        ORDER BY (session_id = cascade_id) DESC, updated_at DESC 
+        LIMIT 1
+    """)
     meta_row = cursor.fetchone()
 
     fallback_id = os.path.splitext(os.path.basename(db_path))[0]
@@ -705,13 +710,20 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
     for row in rows:
         direction = row["direction"]
         msg_type = row["message_type"]
-        is_main = row["is_main"]
-        traj_id = row["trajectory_id"]
 
         try:
             payload = json.loads(row["payload_json"])
         except Exception:
             payload = {}
+
+        su = payload.get("stepUpdate") or payload.get("step_update") or payload.get("trajectoryStateUpdate") or payload.get("trajectory_state_update") or {}
+        row_traj = su.get("trajectoryId") or su.get("trajectory_id") or row["trajectory_id"]
+        traj_id = row_traj
+
+        if traj_id and session_info.get("trajectory_id"):
+            is_main = bool(traj_id == session_info["trajectory_id"])
+        else:
+            is_main = bool(row["is_main"])
 
         # Buffer PreTool hook arguments
         if "callHookRequest" in payload or "call_hook_request" in payload:
@@ -725,9 +737,6 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
                         pending_pretool_args[tool_name] = json.loads(args_json)
                     except Exception:
                         pending_pretool_args[tool_name] = args_json
-
-        if traj_id and session_info.get("trajectory_id") and traj_id != session_info["trajectory_id"]:
-            is_main = 0
 
         event = {
             "id": row["id"],
@@ -869,26 +878,28 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
                             tc_ev["subagent_id"] = traj_id
                             subagents_set.add(traj_id)
 
-                            # Correlate back to preceding unmatched hook events
-                            curr_target = raw_args.get("TargetFile") or raw_args.get("filePath") or raw_args.get("target_file") or raw_args.get("targetFile") or raw_args.get("CommandLine") or raw_args.get("command") or raw_args.get("ImageName") or ""
-                            curr_norm_target = os.path.basename(str(curr_target).replace("file://", ""))
+                        # Correlate back to preceding unmatched hook events
+                        curr_target = raw_args.get("TargetFile") or raw_args.get("filePath") or raw_args.get("target_file") or raw_args.get("targetFile") or raw_args.get("CommandLine") or raw_args.get("command") or raw_args.get("ImageName") or ""
+                        curr_norm_target = os.path.basename(str(curr_target).replace("file://", ""))
 
-                            FILE_TOOLS = {"create_file", "edit_file", "write_to_file", "view_file"}
-                            for prev in reversed(events):
-                                if prev.get("step_type") in ("PRE_TOOL_HOOK", "POLICY_DECISION") and prev.get("is_main"):
-                                    p_args = prev.get("tool_args") or {}
-                                    p_target = p_args.get("TargetFile") or p_args.get("filePath") or p_args.get("target_file") or p_args.get("CommandLine") or p_args.get("ImageName") or ""
-                                    p_norm_target = os.path.basename(str(p_target).replace("file://", ""))
+                        FILE_TOOLS = {"create_file", "edit_file", "write_to_file", "view_file"}
+                        for prev in reversed(events):
+                            if prev.get("step_type") in ("PRE_TOOL_HOOK", "POLICY_DECISION") and not prev.get("_matched_tool"):
+                                p_args = prev.get("tool_args") or {}
+                                p_target = p_args.get("TargetFile") or p_args.get("filePath") or p_args.get("target_file") or p_args.get("CommandLine") or p_args.get("ImageName") or ""
+                                p_norm_target = os.path.basename(str(p_target).replace("file://", ""))
 
-                                    target_match = bool(curr_norm_target and p_norm_target and (curr_norm_target == p_norm_target))
-                                    p_tool = prev.get("tool_name") or ""
-                                    c_tool = tc_ev.get("tool_name") or ""
-                                    tool_match = (p_tool == c_tool) or (p_tool in FILE_TOOLS and c_tool in FILE_TOOLS)
+                                target_match = bool(curr_norm_target and p_norm_target and (curr_norm_target == p_norm_target))
+                                p_tool = prev.get("tool_name") or ""
+                                c_tool = tc_ev.get("tool_name") or ""
+                                tool_match = (p_tool == c_tool) or (p_tool in FILE_TOOLS and c_tool in FILE_TOOLS)
 
-                                    if target_match or (tool_match and not p_norm_target and not curr_norm_target):
-                                        prev["is_main"] = False
-                                        prev["trajectory_id"] = traj_id
-                                        prev["subagent_id"] = traj_id
+                                if target_match or (tool_match and not p_norm_target and not curr_norm_target) or tool_match:
+                                    prev["is_main"] = is_main
+                                    prev["trajectory_id"] = traj_id
+                                    prev["subagent_id"] = traj_id if not is_main else None
+                                    prev["_matched_tool"] = True
+                                    break
 
                         tc_ev["artifacts"] = extract_event_artifacts(tc_ev, workspace_dir=workspace_dir, session_id=session_info["trajectory_id"])
                         events.append(tc_ev)
@@ -911,6 +922,16 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
                         if not is_main and traj_id:
                             tc_ev["subagent_id"] = traj_id
                             subagents_set.add(traj_id)
+
+                        for prev in reversed(events):
+                            if prev.get("step_type") in ("PRE_TOOL_HOOK", "POLICY_DECISION") and not prev.get("_matched_tool"):
+                                if prev.get("tool_name") == tc_ev.get("tool_name"):
+                                    prev["is_main"] = is_main
+                                    prev["trajectory_id"] = traj_id
+                                    prev["subagent_id"] = traj_id if not is_main else None
+                                    prev["_matched_tool"] = True
+                                    break
+
                         tc_ev["artifacts"] = extract_event_artifacts(tc_ev, workspace_dir=workspace_dir, session_id=session_info["trajectory_id"])
                         events.append(tc_ev)
                     continue

@@ -142,8 +142,14 @@ class GlobalRegistry:
             conn.execute("DELETE FROM global_sessions WHERE session_id = ?;", (session_id,))
         conn.close()
 
-    def list_sessions(self, limit: int = 100, prune_missing: bool = False) -> List[Dict[str, Any]]:
-        """Returns all registered sessions sorted by most recent activity, with live process status."""
+    def list_sessions(
+        self,
+        limit: int = 100,
+        prune_missing: bool = False,
+        include_brain: bool = True,
+        brain_root: str = "~/.gemini",
+    ) -> List[Dict[str, Any]]:
+        """Returns all registered sessions (SDK + Gemini Brain) sorted by most recent activity."""
         conn = self._get_connection()
         conn.row_factory = sqlite3.Row
         with conn:
@@ -156,7 +162,7 @@ class GlobalRegistry:
             LIMIT ?;
             """, (limit,)).fetchall()
 
-        results = []
+        sdk_results = []
         stale_ids = []
         for r in rows:
             d = dict(r)
@@ -175,17 +181,77 @@ class GlobalRegistry:
             d["is_live"] = pid_alive and (status != "STATE_CANCELLED")
             if not pid_alive and status in ("STATE_ACTIVE", "STATE_RUNNING"):
                 d["status"] = "STATE_DONE"
-            results.append(d)
+
+            d["source_tag"] = "sdk"
+            d["session_type"] = "sdk"
+            if not d.get("title", "").startswith("[sdk]"):
+                d["title"] = f"[sdk] {d.get('title', 'Session')}"
+
+            sdk_results.append(d)
 
         if stale_ids:
             with conn:
                 conn.executemany("DELETE FROM global_sessions WHERE session_id = ?;", [(sid,) for sid in stale_ids])
         conn.close()
 
-        return results
+        # Discover Brain sessions from ~/.gemini
+        brain_results = []
+        if include_brain:
+            try:
+                from agy_watch.brain_watcher import discover_gemini_brain_sessions
+                all_brain = discover_gemini_brain_sessions(gemini_root=brain_root)
+                # Show root sessions in session picker (child subagents render inside parent tree)
+                brain_results = [b for b in all_brain if b.get("parent_id") is None]
+            except Exception:
+                pass
 
-    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieves a single session by session_id or cascade_id prefix."""
+        # Combine and sort by most recent activity
+        combined = sdk_results + brain_results
+        combined.sort(key=lambda s: s.get("updated_at") or 0.0, reverse=True)
+        return combined[:limit]
+
+    def get_session(self, session_id: str, brain_root: str = "~/.gemini") -> Optional[Dict[str, Any]]:
+        """Retrieves a single session by session_id, cascade_id, UUID prefix, or direct directory path."""
+        # 1. Direct path check
+        if os.path.exists(session_id):
+            abs_p = os.path.abspath(os.path.expanduser(session_id))
+            if os.path.isdir(abs_p):
+                # Brain or workspace directory
+                full_log = os.path.join(abs_p, ".system_generated", "logs", "transcript_full.jsonl")
+                short_log = os.path.join(abs_p, ".system_generated", "logs", "transcript.jsonl")
+                if os.path.exists(full_log) or os.path.exists(short_log):
+                    from agy_watch.brain_watcher import BrainTranscriptWatcher
+                    w = BrainTranscriptWatcher(abs_p)
+                    return {
+                        "session_id": w.session_id,
+                        "cascade_id": w.session_id,
+                        "title": f"[{w.source_tag}] {w.session_info['title']}",
+                        "status": w.session_info["status"],
+                        "workspace_dir": abs_p,
+                        "db_path": abs_p,
+                        "updated_at": w.session_info["updated_at"],
+                        "is_live": w.session_info["is_live"],
+                        "source_tag": w.source_tag,
+                        "subagent_count": w.session_info["subagent_count"],
+                        "total_tokens": w.session_info["total_tokens"],
+                        "step_count": w.session_info["step_count"],
+                        "session_type": "brain",
+                    }
+            elif abs_p.endswith(".db"):
+                # SQLite wire_tap.db
+                conn = self._get_connection()
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM global_sessions WHERE db_path = ? LIMIT 1;", (abs_p,))
+                row = cur.fetchone()
+                conn.close()
+                if row:
+                    d = dict(row)
+                    d["session_type"] = "sdk"
+                    d["source_tag"] = "sdk"
+                    return d
+
+        # 2. Check SQLite SDK registry
         conn = self._get_connection()
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
@@ -197,17 +263,31 @@ class GlobalRegistry:
         row = cur.fetchone()
         conn.close()
 
-        if not row:
-            return None
+        if row:
+            d = dict(row)
+            pid = d.get("pid")
+            status = d.get("status")
+            pid_alive = is_pid_alive(pid) if pid else False
+            d["is_live"] = pid_alive and (status != "STATE_CANCELLED")
+            if not pid_alive and status in ("STATE_ACTIVE", "STATE_RUNNING"):
+                d["status"] = "STATE_DONE"
+            d["source_tag"] = "sdk"
+            d["session_type"] = "sdk"
+            if not d.get("title", "").startswith("[sdk]"):
+                d["title"] = f"[sdk] {d.get('title', 'Session')}"
+            return d
 
-        d = dict(row)
-        pid = d.get("pid")
-        status = d.get("status")
-        pid_alive = is_pid_alive(pid) if pid else False
-        d["is_live"] = pid_alive and (status != "STATE_CANCELLED")
-        if not pid_alive and status in ("STATE_ACTIVE", "STATE_RUNNING"):
-            d["status"] = "STATE_DONE"
-        return d
+        # 3. Check Gemini Brain sessions
+        try:
+            from agy_watch.brain_watcher import discover_gemini_brain_sessions
+            brain_sessions = discover_gemini_brain_sessions(gemini_root=brain_root)
+            for b in brain_sessions:
+                if b["session_id"] == session_id or b["session_id"].startswith(session_id):
+                    return b
+        except Exception:
+            pass
+
+        return None
 
 
 _default_registry: Optional[GlobalRegistry] = None

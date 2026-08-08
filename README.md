@@ -17,18 +17,32 @@ Whether you are debugging multi-agent coordination, inspecting subagent prompts,
 ![TUI Screenshot](docs/images/screenshot.jpg)
 
 ### Core Capabilities
-1. **Zero-Code Agent Observability**: Monitor live agent execution without modifying a single line of your codebase. Hook into active virtual environments or standalone binaries with one command.
+1. **Unified Multi-Engine Observability**: Monitor both custom **SDK Agent Sessions** (Python/multi-language agents via loopback wire-tap) and native **Antigravity App Sessions** (Antigravity Agent and CLI harnesses via brain transcript streaming) in a single dashboard.
 2. **Multi-Agent Swarm Tracking**: Visualize concurrent subagent workflows in a structured, hierarchical tree—tracking delegated instructions, worker reasoning, and nested tool calls in context.
-3. **End-to-End Tool & Policy Inspection**: Inspect complete input arguments, execution outputs, runtime exceptions, and security policy interceptions for standard SDK tools, custom Python functions, and MCP servers.
+3. **End-to-End Tool & Policy Inspection**: Inspect complete input arguments, execution outputs, runtime exceptions, and security policy interceptions with rich dedicated visualizers for shell commands, code diffs, and MCP servers.
 4. **Live Workspace & Artifact Preview**: Review generated files, unified code diffs, markdown reports, and media assets in real time directly inside the terminal.
-5. **Machine-Wide Discovery & Scriptable CLI**: Track all local agent sessions from a unified dashboard, or stream structured JSON events into terminal pipelines and evaluation scripts.
+5. **High-Performance Lazy Pagination**: Smooth 60 FPS rendering even for massive sessions with thousands of turns, with interactive on-demand paging (`u` / click) and persistent per-session selection memory.
+6. **Machine-Wide Discovery & Scriptable CLI**: Automatically track all local agent sessions from a unified dashboard, or stream structured JSON events into terminal pipelines and evaluation scripts.
+
+---
+
+## Two Kinds of Observed Sessions
+
+`agy_watch` unifies observability across the entire Antigravity ecosystem:
+
+| Session Kind | Badge | Source & Capture Mechanism | Key Benefits |
+| :--- | :---: | :--- | :--- |
+| **SDK Sessions** | `[sdk]` | Custom agents built with `google-antigravity` Python SDK (or universal proxy). Wire-tapped via loopback WebSocket IPC (`wire_tap.db`). | Zero-code monitoring of custom agent logic, MCP servers, subagent swarms, and policy hooks. |
+| **Antigravity App Sessions** | `[antigravity]` / `[antigravity-cli]` | Native Antigravity Agent and Antigravity CLI sessions. Captured directly via live brain transcript streaming (`transcript.jsonl`). | Instant insight into IDE agent reasoning, unified 2-step tool transactions (`PLANNER_RESPONSE` + tool outputs), and artifact generation. |
 
 ---
 
 ## Key Features
 
-* **Hierarchical Execution Tree**: Automatically groups root agent and subagent lifecycles into collapsible branches, giving you immediate clarity on which agent performed which action.
-* **First-Class Visualizers for Common Tools**: Dedicated, human-readable visualizers for shell commands (with exit codes), file edits (with syntax-colored unified diffs), image generation, interactive user questions, MCP servers, and custom Python callables.
+* **Machine-Wide Unified Dashboard**: Automatically discovers active and historical SDK agents and App sessions across your machine without manual configuration.
+* **Hierarchical Execution Tree**: Groups root agent and subagent lifecycles into collapsible branches, giving you immediate clarity on which agent performed which action.
+* **Dynamic Lazy Pagination & Selection Memory**: Initial view opens instantly focused on the **most recent event**, maintaining 60 FPS scrolling on 5,000+ turn sessions with interactive on-demand expansion (`u` or click) and persistent selection memory across session switching.
+* **First-Class Visualizers for Common Tools**: Dedicated, human-readable visualizers for shell commands (with exit codes and terminal output), file edits (with syntax-colored unified diffs), image generation, interactive user questions, and MCP tools.
 * **Security Policy & Error Interception**: Clearly identifies blocked actions, policy denial reasons, and tool runtime exceptions with prominent diagnostic cards.
 * **In-Terminal Artifact & Diff Viewer**: Instant syntax-highlighted previews for code, markdown, and images as soon as agents create or update them in their workspace.
 * **Real-Time Live Streaming & Follow Mode**: Watch thoughts, streaming tokens, and execution steps render live as the model generates them, with auto-scroll and pause controls.
@@ -162,6 +176,8 @@ agy_watch
 | **`s`** / **`p`** | Cycle Theme | Cycle through paired TUI and syntax highlighter color schemes (Dracula, Nord, Monokai, Tokyo Night, Gruvbox, Catppuccin). |
 | **`o`** | Open External | Open selected media file in your OS default viewer (Preview, QuickLook, `xdg-open`). |
 | **`w`** | Toggle Wrap | Toggle word wrapping inside the full-screen reader. |
+| **`u`** | Earlier Steps | Load the previous 150 historical steps on demand. |
+| **`U`** | Load All Steps | Expand the execution tree to load all historical steps in the session. |
 | **`r`** | Refresh | Force immediate refresh of host sessions. |
 | **`0`** | Filter All | Reset subagent filters and display all execution lanes. |
 

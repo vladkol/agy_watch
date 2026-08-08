@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import pytest
 from click.testing import CliRunner
+from textual.widgets import Tree
 
 from agy_watch.registry import GlobalRegistry
 from agy_watch.watcher import SessionWatcher
@@ -34,7 +35,7 @@ def test_global_registry_crud_and_liveness():
             "subagent_count": 2,
         })
 
-        sessions = registry.list_sessions()
+        sessions = registry.list_sessions(include_brain=False)
         assert len(sessions) == 1
         assert sessions[0]["session_id"] == "session_abc_123456"
         assert sessions[0]["is_live"] is True
@@ -165,14 +166,14 @@ def test_cli_list_inspect_and_tail_commands():
         runner = CliRunner()
 
         # 1. Test agy_watch list --json
-        res_list_json = runner.invoke(cli_main, ["list", "--json"])
+        res_list_json = runner.invoke(cli_main, ["list", temp_dir, "--json"])
         assert res_list_json.exit_code == 0
         parsed_list = json.loads(res_list_json.output)
         assert len(parsed_list) == 1
         assert parsed_list[0]["session_id"] == "cli_traj_999"
 
         # 2. Test agy_watch list --yaml
-        res_list_yaml = runner.invoke(cli_main, ["list", "--yaml"])
+        res_list_yaml = runner.invoke(cli_main, ["list", temp_dir, "--yaml"])
         assert res_list_yaml.exit_code == 0
         parsed_yaml = yaml.safe_load(res_list_yaml.output)
         assert len(parsed_yaml) == 1
@@ -467,6 +468,110 @@ async def test_tui_app_settings_restoration():
     finally:
         settings_module._global_settings = None
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_tui_lazy_pagination_and_selection_memory():
+    """Validates that large sessions are lazily paginated with on-demand loading and selection is preserved across sessions."""
+    temp_dir = tempfile.mkdtemp(prefix="agy_tui_page_test_")
+    try:
+        reg_db = os.path.join(temp_dir, "registry.db")
+        registry = GlobalRegistry(db_path=reg_db)
+
+        # Create session 1 with 200 steps (> 150 limit)
+        sess1_dir = os.path.join(temp_dir, "sess1", ".trajectories")
+        sess1_db = os.path.join(sess1_dir, "wire_tap.db")
+        db1 = WireTapDB(db_path=sess1_db, blob_store=BlobStore(blobs_dir=os.path.join(sess1_dir, "blobs")))
+        db1.record_outbound({"userInput": "Session 1 Prompt"})
+        for i in range(1, 201):
+            db1.record_inbound({
+                "stepUpdate": {
+                    "trajectoryId": "sess1_traj",
+                    "stepIndex": i,
+                    "text": f"Session 1 Step {i}",
+                    "state": "STATE_DONE",
+                },
+            })
+
+        registry.register_or_update({
+            "session_id": "sess1_traj",
+            "title": "Session 1 with 200 Steps",
+            "status": "STATE_DONE",
+            "workspace_dir": os.path.dirname(sess1_dir),
+            "db_path": sess1_db,
+            "blobs_dir": os.path.join(sess1_dir, "blobs"),
+            "pid": os.getpid(),
+        })
+
+        # Create session 2
+        sess2_dir = os.path.join(temp_dir, "sess2", ".trajectories")
+        sess2_db = os.path.join(sess2_dir, "wire_tap.db")
+        db2 = WireTapDB(db_path=sess2_db, blob_store=BlobStore(blobs_dir=os.path.join(sess2_dir, "blobs")))
+        db2.record_outbound({"userInput": "Session 2 Prompt"})
+        for i in range(1, 10):
+            db2.record_inbound({
+                "stepUpdate": {
+                    "trajectoryId": "sess2_traj",
+                    "stepIndex": i,
+                    "text": f"Session 2 Step {i}",
+                    "state": "STATE_DONE",
+                },
+            })
+
+        registry.register_or_update({
+            "session_id": "sess2_traj",
+            "title": "Session 2 Small",
+            "status": "STATE_DONE",
+            "workspace_dir": os.path.dirname(sess2_dir),
+            "db_path": sess2_db,
+            "blobs_dir": os.path.join(sess2_dir, "blobs"),
+            "pid": os.getpid(),
+        })
+
+        import agy_watch.registry as reg_module
+        from agy_watch.tui import AgyWatchApp
+        reg_module._default_registry = registry
+
+        from agy_watch.settings import UserSettings
+        app = AgyWatchApp(initial_session_id="sess1_traj", settings=UserSettings())
+
+        async with app.run_test() as pilot:
+            await pilot.pause(0.2)
+
+            # 1. On initial open of sess1, selection must be on the most recent event (step 200)
+            assert app.selected_event is not None
+            assert app.selected_event.get("step_index") == 200
+
+            # 2. Pagination top node must be present because total 200 > 150
+            tree = app.query_one("#steps-tree")
+            assert app.pagination_top_node is not None
+            assert "Load earlier" in app.pagination_top_node.label.plain
+
+            # 3. Press 'u' to expand pagination window
+            await pilot.press("u")
+            await pilot.pause(0.2)
+            # Now all 200 steps are loaded, so pagination_top_node should be removed
+            assert app.pagination_top_node is None
+
+            # 4. User selects step 50 in sess1
+            step50_key = ("sess1_traj", 50, "TEXT_RESPONSE")
+            if step50_key in app.step_nodes:
+                target_node = app.step_nodes[step50_key]
+                app.on_tree_node_selected(Tree.NodeSelected(target_node))
+                assert app.selected_event.get("step_index") == 50
+
+            # 5. Switch to session 2
+            app.attach_to_session("sess2_traj")
+            await pilot.pause(0.2)
+            assert app.selected_event.get("step_index") == 9  # Most recent of sess2
+
+            # 6. Switch back to session 1: Selection memory must restore step 50
+            app.attach_to_session("sess1_traj")
+            await pilot.pause(0.2)
+            assert app.selected_event.get("step_index") == 50
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 
 
