@@ -290,3 +290,58 @@ def test_all_step_types_normalization():
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+
+def test_background_command_running_status_mapping():
+    """Verifies that background commands with status RUNNING are parsed as STATE_RUNNING without error banners."""
+    temp_dir = tempfile.mkdtemp(prefix="agy_test_bg_cmd_")
+    try:
+        session_id = "test-bg-cmd-session"
+        session_dir = os.path.join(temp_dir, session_id)
+        logs_dir = os.path.join(session_dir, ".system_generated", "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        log_path = os.path.join(logs_dir, "transcript_full.jsonl")
+
+        step0 = {
+            "step_index": 6182,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [
+                {
+                    "name": "run_command",
+                    "args": {"CommandLine": "uv run pytest", "NotificationTimeoutSeconds": 30}
+                }
+            ],
+            "created_at": "2026-08-08T00:35:00Z",
+        }
+        step1 = {
+            "step_index": 6183,
+            "source": "MODEL",
+            "type": "GENERIC",
+            "status": "RUNNING",
+            "created_at": "2026-08-08T00:35:02Z",
+            "content": "Tool is running as a background task with task id: task-6183\nTask Description: uv run pytest\nTask logs are available at: file:///tmp/task.log",
+        }
+
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(step0) + "\n")
+            f.write(json.dumps(step1) + "\n")
+
+        watcher = BrainTranscriptWatcher(session_dir)
+        info, events = watcher.poll()
+
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["step_type"] == "TOOL_CALL"
+        assert ev["tool_name"] == "run_command"
+        assert ev["state"] == "STATE_RUNNING"
+        assert "error" not in ev
+
+        # Also verify that _render_state_banner does NOT produce an error panel
+        from agy_watch.tool_renderers import _render_state_banner
+        banner = _render_state_banner(ev)
+        assert banner is None
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+

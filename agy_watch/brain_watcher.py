@@ -66,6 +66,24 @@ def normalize_source_tag(raw_tag: Optional[str]) -> str:
     return raw_tag.lower()
 
 
+def _map_transcript_status(status_str: Optional[str]) -> str:
+    """Maps transcript JSONL step status string to standard agy_watch state."""
+    if not status_str:
+        return "STATE_ACTIVE"
+    s = str(status_str).upper()
+    if s in ("DONE", "COMPLETED", "SUCCESS", "STATE_DONE"):
+        return "STATE_DONE"
+    elif s in ("RUNNING", "IN_PROGRESS", "PENDING", "STATE_RUNNING", "STATE_ACTIVE"):
+        return "STATE_RUNNING"
+    elif s in ("WAITING_FOR_INPUT", "WAITING_FOR_USER", "AWAITING_INPUT", "STATE_WAITING_FOR_USER"):
+        return "STATE_WAITING_FOR_USER"
+    elif s in ("CANCELLED", "CANCELED", "STATE_CANCELLED"):
+        return "STATE_CANCELLED"
+    elif s in ("ERROR", "FAILED", "STATE_ERROR"):
+        return "STATE_ERROR"
+    return "STATE_ACTIVE"
+
+
 class BrainTranscriptWatcher:
     """Watches an Antigravity Agent/CLI Brain session's transcript_full.jsonl incrementally."""
 
@@ -212,7 +230,7 @@ class BrainTranscriptWatcher:
             "is_main": is_main,
             "subagent_id": sub_id,
             "step_type": "TOOL_CALL",
-            "state": "STATE_DONE" if status_str == "DONE" else "STATE_ERROR",
+            "state": _map_transcript_status(status_str),
             "prompt": "",
             "text": content,
             "thinking": tool_dict.get("thinking") or "",
@@ -275,7 +293,7 @@ class BrainTranscriptWatcher:
             "is_main": is_main,
             "subagent_id": sub_id,
             "step_type": step_type_raw,
-            "state": "STATE_DONE" if d.get("status") != "ERROR" else "STATE_ERROR",
+            "state": _map_transcript_status(d.get("status")),
             "prompt": content if step_type_raw == "USER_INPUT" else "",
             "text": content,
             "thinking": thinking,
