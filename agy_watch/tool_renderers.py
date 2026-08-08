@@ -17,6 +17,7 @@
 import difflib
 import json
 import os
+import re
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -584,6 +585,100 @@ def render_view_file(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Rende
     return Panel(Group(*items), title=title_text, border_style=border_color)
 
 
+def _parse_grep_matches(args: Dict[str, Any], su: Dict[str, Any], ev: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extracts grep matches from structured args, wire results, or raw JSONL text streams."""
+    matches = args.get("matches") or su.get("matches") or su.get("results") or args.get("results") or []
+    parsed: List[Dict[str, Any]] = []
+
+    if isinstance(matches, list):
+        parsed.extend([m for m in matches if isinstance(m, dict)])
+
+    text_candidates: List[str] = []
+    payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+    for text_val in (
+        ev.get("text"),
+        payload.get("content"),
+        su.get("content"),
+        args.get("output"),
+        su.get("output"),
+    ):
+        if text_val and isinstance(text_val, str):
+            text_candidates.append(text_val)
+
+    for text in text_candidates:
+        trimmed = text.strip()
+        try:
+            val = json.loads(trimmed)
+            if isinstance(val, list):
+                parsed.extend([v for v in val if isinstance(v, dict)])
+                continue
+        except Exception:
+            pass
+
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("Created At:") or line.startswith("Completed At:"):
+                continue
+            if line.startswith("{") and line.endswith("}"):
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict) and any(k in obj for k in ("File", "Filename", "file", "filename", "LineNumber", "line_number", "LineContent", "content", "MatchContent")):
+                        parsed.append(obj)
+                        continue
+                except Exception:
+                    pass
+            m = re.match(r"^([^:\n]+):(\d+):(.*)$", line)
+            if m:
+                parsed.append({
+                    "Filename": m.group(1),
+                    "LineNumber": int(m.group(2)),
+                    "LineContent": m.group(3),
+                })
+
+    return parsed
+
+
+def _parse_directory_entries(args: Dict[str, Any], su: Dict[str, Any], ev: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extracts directory listing entries from structured args or raw JSONL text streams."""
+    entries = args.get("results") or su.get("results") or su.get("entries") or args.get("entries") or []
+    parsed: List[Dict[str, Any]] = []
+
+    if isinstance(entries, list):
+        parsed.extend([e for e in entries if isinstance(e, dict)])
+
+    payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+    for text_val in (
+        ev.get("text"),
+        payload.get("content"),
+        su.get("content"),
+        args.get("output"),
+        su.get("output"),
+    ):
+        if text_val and isinstance(text_val, str):
+            trimmed = text_val.strip()
+            try:
+                val = json.loads(trimmed)
+                if isinstance(val, list):
+                    parsed.extend([v for v in val if isinstance(v, dict)])
+                    continue
+            except Exception:
+                pass
+
+            for line in text_val.splitlines():
+                line = line.strip()
+                if not line or line.startswith("Created At:") or line.startswith("Completed At:"):
+                    continue
+                if line.startswith("{") and line.endswith("}"):
+                    try:
+                        obj = json.loads(line)
+                        if isinstance(obj, dict) and any(k in obj for k in ("name", "path", "Filename", "filename", "isDir", "isDirectory")):
+                            parsed.append(obj)
+                    except Exception:
+                        pass
+
+    return parsed
+
+
 def render_list_dir(ev: Dict[str, Any]) -> RenderableType:
     """Renders directory structure with directory icons, file sizes, and item counts."""
     args, su = _extract_merged_args_and_result(ev)
@@ -604,19 +699,25 @@ def render_list_dir(ev: Dict[str, Any]) -> RenderableType:
     table.add_column("Name", style="bold white")
     table.add_column("Size", justify="right", style="yellow")
 
-    entries = args.get("results") or su.get("results") or su.get("entries") or args.get("entries") or []
+    entries = _parse_directory_entries(args, su, ev)
 
-    if isinstance(entries, list):
+    if entries:
         for e in entries:
             if isinstance(e, dict):
                 is_dir = e.get("isDirectory", e.get("is_directory", e.get("isDir", False)))
                 name = e.get("name") or e.get("path") or ""
-                size = e.get("fileSize", e.get("file_size", e.get("sizeBytes", 0)))
+                size = e.get("fileSize", e.get("file_size", e.get("sizeBytes", e.get("size", 0))))
                 icon = "📁 DIR" if is_dir else "📄 FILE"
                 size_str = "-" if is_dir else _format_bytes(size)
                 table.add_row(icon, name, size_str)
+        items.append(table)
+    else:
+        raw_output = ev.get("text") or su.get("content") or args.get("output") or ""
+        if raw_output and isinstance(raw_output, str):
+            items.append(Text(raw_output[:1000], style="dim"))
+        else:
+            items.append(Text("Empty directory.", style="dim italic"))
 
-    items.append(table)
     return Panel(Group(*items), title="[bold yellow]DIRECTORY LISTING[/bold yellow]", border_style="yellow")
 
 
@@ -641,17 +742,23 @@ def render_search_dir(ev: Dict[str, Any]) -> RenderableType:
     table.add_column("Line", justify="right", style="yellow", width=8)
     table.add_column("Match Content", style="white")
 
-    matches = args.get("matches") or su.get("matches") or su.get("results") or args.get("results") or []
+    matches = _parse_grep_matches(args, su, ev)
 
-    if isinstance(matches, list):
+    if matches:
         for m in matches:
             if isinstance(m, dict):
-                fn = m.get("Filename") or m.get("filename") or m.get("file") or ""
-                ln = str(m.get("LineNumber") or m.get("line_number") or m.get("line") or "")
-                content = m.get("LineContent") or m.get("content") or ""
-                table.add_row(os.path.basename(fn), ln, content)
+                fn = m.get("Filename") or m.get("filename") or m.get("File") or m.get("file") or ""
+                ln = str(m.get("LineNumber") or m.get("line_number") or m.get("Line") or m.get("line") or "")
+                content = m.get("LineContent") or m.get("line_content") or m.get("MatchContent") or m.get("content") or ""
+                table.add_row(os.path.basename(fn) if fn else "-", ln or "-", content)
+        items.append(table)
+    else:
+        raw_output = ev.get("text") or su.get("content") or args.get("output") or ""
+        if raw_output and isinstance(raw_output, str):
+            items.append(Text(raw_output[:1000], style="dim"))
+        else:
+            items.append(Text("No matches found.", style="dim italic"))
 
-    items.append(table)
     return Panel(Group(*items), title="[bold magenta]SEARCH DIRECTORY (GREP)[/bold magenta]", border_style="magenta")
 
 
@@ -672,14 +779,42 @@ def render_find_file(ev: Dict[str, Any]) -> RenderableType:
     items.append(Text(f'Pattern: "{pattern}" in {dir_path}\n', style="bold cyan"))
 
     files = args.get("output") or su.get("output") or su.get("files") or args.get("files") or []
-
+    file_list = []
     if isinstance(files, list):
         for f in files:
-            items.append(Text(f" • {f}", style="bright_white"))
+            if isinstance(f, dict):
+                fn = f.get("name") or f.get("path") or f.get("Filename") or f.get("File")
+                if fn:
+                    file_list.append(str(fn))
+            elif isinstance(f, str):
+                file_list.append(f)
     elif isinstance(files, str):
-        for line in files.splitlines():
-            if line.strip():
-                items.append(Text(f" • {line.strip()}", style="bright_white"))
+        file_list = [line.strip() for line in files.splitlines() if line.strip()]
+
+    if not file_list:
+        raw_text = ev.get("text") or su.get("content") or ""
+        if isinstance(raw_text, str):
+            for line in raw_text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("Created At:") or line.startswith("Completed At:"):
+                    continue
+                if line.startswith("{") and line.endswith("}"):
+                    try:
+                        obj = json.loads(line)
+                        if isinstance(obj, dict):
+                            fn = obj.get("name") or obj.get("path") or obj.get("Filename") or obj.get("File")
+                            if fn:
+                                file_list.append(str(fn))
+                                continue
+                    except Exception:
+                        pass
+                file_list.append(line)
+
+    if file_list:
+        for f in file_list:
+            items.append(Text(f" • {f}", style="bright_white"))
+    else:
+        items.append(Text("No files matched.", style="dim italic"))
 
     return Panel(Group(*items), title="[bold cyan]FIND FILES[/bold cyan]", border_style="cyan")
 

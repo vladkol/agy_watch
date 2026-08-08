@@ -275,3 +275,105 @@ def test_subagent_hook_routing():
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_root_agent_resumed_hooks_after_subagents():
+    """Verifies that when root agent resumes after subagents and calls tools with hooks, the root status and hook correlations remain at the root level."""
+    from agy_watch.watcher import SessionWatcher
+    temp_dir = tempfile.mkdtemp(prefix="agy_resumed_hook_test_")
+    try:
+        trajectories_dir = os.path.join(temp_dir, ".trajectories")
+        blobs_dir = os.path.join(trajectories_dir, "blobs")
+        db_path = os.path.join(trajectories_dir, "wire_tap.db")
+
+        store = BlobStore(blobs_dir=blobs_dir)
+        db = WireTapDB(db_path=db_path, blob_store=store)
+
+        # 1. Root agent initializes
+        root_sid = "root_agent_123"
+        db.record_inbound({
+            "initializeConversationResponse": {"cascadeId": root_sid},
+            "stepUpdate": {
+                "trajectoryId": root_sid,
+                "stepIndex": 0,
+                "text": "Root agent start",
+                "state": "STATE_ACTIVE",
+            }
+        })
+
+        # 2. Subagent 1 executes tool
+        sub1 = "subagent_1"
+        db.record_inbound({
+            "stepUpdate": {
+                "trajectoryId": sub1,
+                "stepIndex": 1,
+                "text": "Subagent 1 working",
+                "state": "STATE_ACTIVE",
+            }
+        })
+        db.record_inbound({
+            "callHookRequest": {
+                "requestId": "hook_sub1",
+                "name": "PreTool",
+                "preToolArgs": {"toolName": "generate_image", "argumentsJson": '{"ImageName": "img1"}'}
+            }
+        })
+        db.record_outbound({
+            "callHookResponse": {"requestId": "hook_sub1", "preToolResult": {"decision": "ALLOW"}}
+        })
+        db.record_inbound({
+            "stepUpdate": {
+                "trajectoryId": sub1,
+                "stepIndex": 2,
+                "generateImage": {"ImageName": "img1"},
+                "state": "STATE_DONE",
+            }
+        })
+
+        # 3. Root agent resumes and calls run_command with PreTool hook
+        db.record_inbound({
+            "stepUpdate": {
+                "trajectoryId": root_sid,
+                "stepIndex": 3,
+                "text": "Root resuming and copying images",
+                "state": "STATE_ACTIVE",
+            }
+        })
+        db.record_inbound({
+            "callHookRequest": {
+                "requestId": "hook_root_cmd",
+                "name": "PreTool",
+                "preToolArgs": {"toolName": "run_command", "argumentsJson": '{"CommandLine": "mkdir -p out"}'}
+            }
+        })
+        db.record_outbound({
+            "callHookResponse": {"requestId": "hook_root_cmd", "preToolResult": {"decision": "ALLOW"}}
+        })
+        db.record_inbound({
+            "stepUpdate": {
+                "trajectoryId": root_sid,
+                "stepIndex": 4,
+                "runCommand": {"CommandLine": "mkdir -p out"},
+                "state": "STATE_DONE",
+            }
+        })
+
+        # Verify via SessionWatcher
+        watcher = SessionWatcher(db_path=db_path)
+        info, events = watcher.poll()
+
+        assert info["session_id"] == root_sid
+        assert sub1 in info["subagents"]
+
+        root_hook = next(ev for ev in events if ev.get("tool_name") == "run_command" and ev["step_type"] == "POLICY_DECISION")
+        assert root_hook["is_main"] is True
+        assert root_hook["subagent_id"] is None
+        assert root_hook["trajectory_id"] == root_sid
+
+        root_tool = next(ev for ev in events if ev.get("tool_name") == "run_command" and ev["step_type"] == "TOOL_CALL")
+        assert root_tool["is_main"] is True
+        assert root_tool["subagent_id"] is None
+        assert root_tool["trajectory_id"] == root_sid
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)

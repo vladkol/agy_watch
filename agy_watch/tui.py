@@ -21,6 +21,7 @@ interactive master-detail file preview with syntax highlighting, and full-screen
 
 import os
 import sys
+import re
 import json
 import subprocess
 from datetime import datetime
@@ -31,6 +32,7 @@ from rich.text import Text
 from rich.panel import Panel
 from rich.table import Table
 from rich.markdown import Markdown
+from rich.markup import escape
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll, Container
@@ -582,6 +584,8 @@ class AgyWatchApp(App):
         Binding("c", "copy_smart", "Copy", show=True),
         Binding("ctrl+c", "copy_smart", "Copy", show=False),
         Binding("r", "force_refresh_sessions", "Refresh", show=True),
+        Binding("u", "load_earlier_steps", "Earlier Steps", show=True),
+        Binding("U", "load_all_steps", "Load All", show=False),
         Binding("0", "filter_all_agents", "All Agents", show=False),
         Binding("1", "filter_subagent_1", "Subagent 1", show=False),
         Binding("2", "filter_subagent_2", "Subagent 2", show=False),
@@ -592,13 +596,16 @@ class AgyWatchApp(App):
         self,
         initial_session_id: Optional[str] = None,
         registry_db: Optional[str] = None,
+        brain_root: str = "~/.gemini",
         settings: Optional[UserSettings] = None,
     ):
         super().__init__()
         self.registry: GlobalRegistry = get_global_registry()
         self.settings: UserSettings = settings or get_user_settings()
         self.initial_session_id = initial_session_id
-        self.current_watcher: Optional[SessionWatcher] = None
+        self.brain_root = brain_root
+        self.current_watcher: Optional[Any] = None
+        self.current_session_id: Optional[str] = None
         self.selected_event: Optional[Dict[str, Any]] = None
         self.selected_artifact_path: Optional[str] = None
         self.is_following = self.settings.auto_follow
@@ -606,6 +613,12 @@ class AgyWatchApp(App):
         self.subagent_filter: Optional[str] = None
         self.known_sessions: List[Dict[str, Any]] = []
         self._last_sessions_sig: Optional[Any] = None
+
+        # Session memory & pagination state
+        self.session_events_store: Dict[str, List[Dict[str, Any]]] = {}
+        self.session_visible_counts: Dict[str, int] = {}
+        self.session_selected_keys: Dict[str, Tuple[str, Any, str]] = {}
+        self.pagination_top_node: Optional[TreeNode] = None
 
         # Step deduplication and hierarchy tracking
         self.step_nodes: Dict[Tuple[str, Any, str], TreeNode] = {}
@@ -681,7 +694,7 @@ class AgyWatchApp(App):
 
         self.refresh_sessions_list(force=True)
         self.set_interval(0.1, self.poll_live_updates)
-        self.set_interval(1.5, self.refresh_sessions_list)
+        self.set_interval(3.0, self.refresh_sessions_list)
 
     @property
     def is_modal_active(self) -> bool:
@@ -693,7 +706,7 @@ class AgyWatchApp(App):
         if self.is_modal_active and not force:
             return
 
-        sessions = self.registry.list_sessions()
+        sessions = self.registry.list_sessions(brain_root=self.brain_root)
         new_sig = tuple((s["session_id"], s["updated_at"], s["status"], s["total_tokens"], s["step_count"]) for s in sessions)
 
         if not force and new_sig == self._last_sessions_sig:
@@ -722,13 +735,36 @@ class AgyWatchApp(App):
             time_str = format_locale_datetime(s.get("updated_at") or 0, two_digit_year=True)
             sub_count = s.get("subagent_count", 0)
             sub_label = f" • {sub_count} worker{'s' if sub_count > 1 else ''}" if sub_count > 0 else ""
-            tokens_k = f"{s.get('total_tokens', 0) / 1000:.1f}k tok"
-            title_snippet = (s.get("title") or "Session")[:30]
+            total_tokens = s.get("total_tokens", 0)
+            step_count = s.get("step_count", 0)
+
+            if total_tokens > 0:
+                metrics_line = f"[bold yellow]{total_tokens / 1000:.1f}k tok[/bold yellow][dim]{sub_label}[/dim]"
+            elif step_count > 0:
+                metrics_line = f"[dim]{step_count:,} steps{sub_label}[/dim]"
+            elif sub_count > 0:
+                metrics_line = f"[dim]{sub_count} worker{'s' if sub_count > 1 else ''}[/dim]"
+            else:
+                metrics_line = "[dim]0 steps[/dim]"
+
+            raw_title = s.get("title") or "Session"
+            clean_title = re.sub(r"^\[.*?\]\s*", "", raw_title)
+            title_snippet = clean_title[:32]
+
+            source_tag = s.get("source_tag") or ("antigravity" if s.get("session_type") == "brain" else "sdk")
+            if source_tag == "sdk":
+                tag_badge = f"[bold cyan]{escape('[sdk]')}[/bold cyan]"
+            elif source_tag == "antigravity-cli":
+                tag_badge = f"[bold magenta]{escape('[antigravity-cli]')}[/bold magenta]"
+            elif source_tag == "antigravity":
+                tag_badge = f"[bold yellow]{escape('[antigravity]')}[/bold yellow]"
+            else:
+                tag_badge = f"[bold blue]{escape(f'[{source_tag}]')}[/bold blue]"
 
             item_text = (
-                f"{status_emoji} [bold white]{s['session_id'][:8]}[/bold white]  [dim]{time_str}[/dim]\n"
+                f"{status_emoji} [bold white]{s['session_id'][:8]}[/bold white] {tag_badge}  [dim]{time_str}[/dim]\n"
                 f" [bright_cyan]{title_snippet}[/bright_cyan]\n"
-                f" [bold yellow]{tokens_k}[/bold yellow][dim]{sub_label}[/dim]"
+                f" {metrics_line}"
             )
             item = ListItem(Static(item_text), name=s["session_id"])
             list_view.append(item)
@@ -749,28 +785,41 @@ class AgyWatchApp(App):
 
     def attach_to_session(self, session_id: str) -> None:
         """Attaches observer to a specific session, saves to settings, and resets tree state."""
-        session = self.registry.get_session(session_id)
+        session = self.registry.get_session(session_id, brain_root=self.brain_root)
         if not session or not session.get("db_path"):
             return
 
         self.settings.last_session_id = session_id
         self.settings.save()
+        self.current_session_id = session_id
 
-        self.current_watcher = SessionWatcher(session["db_path"])
+        if session.get("session_type") == "brain" or os.path.isdir(session.get("db_path", "")):
+            from agy_watch.brain_watcher import BrainTranscriptWatcher
+            self.current_watcher = BrainTranscriptWatcher(
+                session["workspace_dir"],
+                source_tag=session.get("source_tag", "antigravity"),
+            )
+        else:
+            self.current_watcher = SessionWatcher(session["db_path"])
+
         self.step_nodes.clear()
         self.subagent_branches.clear()
         self.latest_invoke_node = None
         self.session_artifacts.clear()
         self.seen_artifact_paths.clear()
         self.selected_artifact_path = None
+        self.pagination_top_node = None
+        self.session_events_store[session_id] = []
 
         self.query_one("#artifacts-list", ListView).clear()
         self.query_one("#artifacts-preview-header", Static).update(" [dim]No file selected for preview[/dim]")
         self.query_one("#artifacts-preview-content", Static).update("Select a file above to preview.\nPress 'f' or Enter for fullscreen.")
 
+        tag = session.get("source_tag") or ("antigravity" if session.get("session_type") == "brain" else "sdk")
+        clean_title = re.sub(r"^\[.*?\]\s*", "", session.get("title") or "Session")
         tree = self.query_one("#steps-tree", Tree)
         tree.clear()
-        tree.root.set_label(f"Root Agent ({session_id[:8]}) - {session['title'][:32]}")
+        tree.root.set_label(f"Root Agent ({session_id[:8]}) {escape(f'[{tag}]')} - {clean_title[:32]}")
         mode_str = "Tree" if self.tree_mode else "Flat"
         self.query_one("#timeline-title", Static).update(f" EXECUTION ({mode_str}): {session_id[:8]} ({session['status']}) ")
 
@@ -786,13 +835,100 @@ class AgyWatchApp(App):
 
         self.poll_live_updates()
 
+    def _add_event_node_to_tree(self, tree: Tree, ev: Dict[str, Any]) -> Optional[TreeNode]:
+        """Adds or updates a single event node in the tree."""
+        label = self._build_event_tree_label(ev)
+        is_main = ev.get("is_main", True)
+        traj_id = str(ev.get("trajectory_id") or "main")
+        step_idx = ev.get("step_index")
+        step_type = ev.get("step_type")
+        sub_id = ev.get("subagent_id") or ev.get("trajectory_id")
+        step_key = (traj_id, step_idx, step_type)
+        children = ev.get("child_events") or []
+
+        def _populate_child_nodes(parent_node, child_list):
+            if not parent_node.children and child_list:
+                parent_node.allow_expand = True
+                for child in child_list:
+                    c_icon = "📤" if child.get("direction") == "TO_HARNESS" else "📥"
+                    c_id = f"#{child.get('id')}" if child.get("id") is not None else ""
+                    c_dir = child.get("direction", "WIRE")
+                    c_type = child.get("message_type", "EVENT")
+                    c_label = f"↳ {c_icon} {c_id} {c_dir}: {c_type}".strip()
+                    parent_node.add_leaf(c_label, data=child)
+
+        node = None
+        if step_idx is not None and step_key in self.step_nodes:
+            existing_node = self.step_nodes[step_key]
+            existing_node.set_label(label)
+            existing_node.data = ev
+            if children:
+                _populate_child_nodes(existing_node, children)
+            node = existing_node
+        else:
+            if not self.tree_mode:
+                if children:
+                    node = tree.root.add(label, data=ev, expand=False)
+                    _populate_child_nodes(node, children)
+                else:
+                    node = tree.root.add_leaf(label, data=ev)
+                if step_idx is not None:
+                    self.step_nodes[step_key] = node
+            else:
+                if is_main:
+                    if step_type == "TOOL_CALL" and ev.get("tool_name") == "invoke_subagent":
+                        sub_count = len(ev.get("tool_args", {}).get("Subagents", []))
+                        count_label = f" ({sub_count} workers)" if sub_count > 0 else ""
+                        invoke_node = tree.root.add(f"▼ [bold yellow]TOOL: invoke_subagent[/bold yellow]{count_label}", data=ev, expand=True)
+                        self.latest_invoke_node = invoke_node
+                        if step_idx is not None:
+                            self.step_nodes[step_key] = invoke_node
+                        node = invoke_node
+                    else:
+                        if children:
+                            node = tree.root.add(label, data=ev, expand=False)
+                            _populate_child_nodes(node, children)
+                        else:
+                            node = tree.root.add_leaf(label, data=ev)
+                        if step_idx is not None:
+                            self.step_nodes[step_key] = node
+                else:
+                    if sub_id not in self.subagent_branches:
+                        parent_container = self.latest_invoke_node if self.latest_invoke_node else tree.root
+                        sub_branch = parent_container.add(f"🤖 [bold cyan]Subagent ({str(sub_id)[:8]})[/bold cyan] [Active]", expand=True)
+                        self.subagent_branches[sub_id] = sub_branch
+
+                    sub_branch = self.subagent_branches[sub_id]
+                    if children:
+                        node = sub_branch.add(label, data=ev, expand=False)
+                        _populate_child_nodes(node, children)
+                    else:
+                        node = sub_branch.add_leaf(label, data=ev)
+                    if step_idx is not None:
+                        self.step_nodes[step_key] = node
+
+                    state = ev.get("state") or ev.get("payload", {}).get("stepUpdate", {}).get("state")
+                    if state in ("STATE_DONE", "STATE_ERROR"):
+                        sub_branch.set_label(f"🤖 [bold cyan]Subagent ({str(sub_id)[:8]})[/bold cyan] [{state[6:]}]")
+
+        return node
+
     def poll_live_updates(self) -> None:
         """Incremental polling loop for real-time updates with in-place step deduplication."""
-        if not self.current_watcher:
+        if not self.current_watcher or not self.current_session_id:
             return
 
         session_info, new_events = self.current_watcher.poll()
-        if not new_events and not session_info:
+        sid = self.current_session_id
+
+        if sid not in self.session_events_store:
+            self.session_events_store[sid] = []
+
+        if new_events:
+            self.session_events_store[sid].extend(new_events)
+            self.session_events_store[sid].sort(key=lambda e: (e.get("timestamp") or 0.0, e.get("id") or 0, e.get("step_index") or 0))
+
+        if not new_events and not session_info and self.step_nodes:
             return
 
         try:
@@ -800,8 +936,8 @@ class AgyWatchApp(App):
         except Exception:
             return
 
+        # Update session-level artifacts
         for ev in new_events:
-            # Update session-level artifacts
             for art in ev.get("artifacts", []):
                 p = art["path"]
                 if p not in self.seen_artifact_paths:
@@ -809,97 +945,107 @@ class AgyWatchApp(App):
                     self.session_artifacts.append(art)
                     self._add_artifact_to_list(art)
 
-            # Check subagent filter
+        all_session_events = self.session_events_store[sid]
+        visible_limit = self.session_visible_counts.get(sid, 150)
+
+        # Filter valid events
+        valid_events = []
+        for ev in all_session_events:
             if self.subagent_filter and ev.get("subagent_id") != self.subagent_filter and ev.get("trajectory_id") != self.subagent_filter:
                 continue
-
-            # Ignore empty intermediate deltas without text/thinking/tool
             step_type = ev.get("step_type")
             if step_type == "UNKNOWN" and ev.get("message_type") in ("STEP_UPDATE", "TRAJECTORY_STATE_UPDATE"):
                 if not ev.get("text") and not ev.get("thinking") and not ev.get("tool_name"):
                     continue
+            valid_events.append(ev)
 
-            label = self._build_event_tree_label(ev)
-            is_main = ev.get("is_main", True)
-            traj_id = str(ev.get("trajectory_id") or "main")
-            step_idx = ev.get("step_index")
-            sub_id = ev.get("subagent_id") or ev.get("trajectory_id")
-            step_key = (traj_id, step_idx, step_type)
-            children = ev.get("child_events") or []
+        total_valid = len(valid_events)
+        if total_valid > visible_limit:
+            display_events = valid_events[-visible_limit:]
+            has_earlier = True
+            earlier_count = total_valid - visible_limit
+        else:
+            display_events = valid_events
+            has_earlier = False
+            earlier_count = 0
 
-            def _populate_child_nodes(parent_node, child_list):
-                if not parent_node.children and child_list:
-                    parent_node.allow_expand = True
-                    for child in child_list:
-                        c_icon = "📤" if child.get("direction") == "TO_HARNESS" else "📥"
-                        c_id = f"#{child.get('id')}" if child.get("id") is not None else ""
-                        c_dir = child.get("direction", "WIRE")
-                        c_type = child.get("message_type", "EVENT")
-                        c_label = f"↳ {c_icon} {c_id} {c_dir}: {c_type}".strip()
-                        parent_node.add_leaf(c_label, data=child)
-
-            # Check if this step already has an active node in the tree (deduplicate streaming deltas)
-            if step_idx is not None and step_key in self.step_nodes:
-                existing_node = self.step_nodes[step_key]
-                existing_node.set_label(label)
-                existing_node.data = ev
-                if children:
-                    _populate_child_nodes(existing_node, children)
-            else:
-                if not self.tree_mode:
-                    if children:
-                        node = tree.root.add(label, data=ev, expand=False)
-                        _populate_child_nodes(node, children)
-                    else:
-                        node = tree.root.add_leaf(label, data=ev)
-                    if step_idx is not None:
-                        self.step_nodes[step_key] = node
+        # If step_nodes is empty (initial attach or after pagination change), populate tree
+        if not self.step_nodes:
+            self._internal_populating = True
+            try:
+                if has_earlier:
+                    load_chunk = min(150, earlier_count)
+                    self.pagination_top_node = tree.root.add_leaf(
+                        f"🔼 [bold cyan]▲ Load earlier {load_chunk} steps ({len(display_events)}/{total_valid} showing) - Press 'u' or Click[/bold cyan]",
+                        data={"type": "PAGINATION_CONTROL", "action": "load_earlier"},
+                    )
                 else:
-                    if is_main:
-                        if step_type == "TOOL_CALL" and ev.get("tool_name") == "invoke_subagent":
-                            sub_count = len(ev.get("tool_args", {}).get("Subagents", []))
-                            count_label = f" ({sub_count} workers)" if sub_count > 0 else ""
-                            invoke_node = tree.root.add(f"▼ [bold yellow]TOOL: invoke_subagent[/bold yellow]{count_label}", data=ev, expand=True)
-                            self.latest_invoke_node = invoke_node
-                            if step_idx is not None:
-                                self.step_nodes[step_key] = invoke_node
-                        else:
-                            if children:
-                                node = tree.root.add(label, data=ev, expand=False)
-                                _populate_child_nodes(node, children)
-                            else:
-                                node = tree.root.add_leaf(label, data=ev)
-                            if step_idx is not None:
-                                self.step_nodes[step_key] = node
-                    else:
-                        if sub_id not in self.subagent_branches:
-                            parent_container = self.latest_invoke_node if self.latest_invoke_node else tree.root
-                            sub_branch = parent_container.add(f"🤖 [bold cyan]Subagent ({str(sub_id)[:8]})[/bold cyan] [Active]", expand=True)
-                            self.subagent_branches[sub_id] = sub_branch
+                    self.pagination_top_node = None
 
-                        sub_branch = self.subagent_branches[sub_id]
-                        if children:
-                            node = sub_branch.add(label, data=ev, expand=False)
-                            _populate_child_nodes(node, children)
-                        else:
-                            node = sub_branch.add_leaf(label, data=ev)
-                        if step_idx is not None:
-                            self.step_nodes[step_key] = node
+                for ev in display_events:
+                    self._add_event_node_to_tree(tree, ev)
 
-                        state = ev.get("state") or ev.get("payload", {}).get("stepUpdate", {}).get("state")
-                        if state in ("STATE_DONE", "STATE_ERROR"):
-                            sub_branch.set_label(f"🤖 [bold cyan]Subagent ({str(sub_id)[:8]})[/bold cyan] [{state[6:]}]")
+                tree.root.expand()
 
-            # If user is following, automatically inspect latest step (unless a modal is active)
+                # Selection on open:
+                # If user previously selected a step in this session, restore selection
+                saved_key = self.session_selected_keys.get(sid)
+                if saved_key and saved_key in self.step_nodes:
+                    target_node = self.step_nodes[saved_key]
+                    self.selected_event = target_node.data
+                    self.is_following = False
+                    self._render_inspector_event(target_node.data)
+                    try:
+                        tree.scroll_to_node(target_node)
+                        tree.move_cursor(target_node)
+                    except Exception:
+                        pass
+                elif self.step_nodes:
+                    # First time opening session: select the most recent event (bottom-most)
+                    latest_node = list(self.step_nodes.values())[-1]
+                    if latest_node and latest_node.data:
+                        self.selected_event = latest_node.data
+                        self._render_inspector_event(latest_node.data)
+                        try:
+                            tree.scroll_to_node(latest_node)
+                            tree.move_cursor(latest_node)
+                        except Exception:
+                            pass
+            finally:
+                self._internal_populating = False
+        else:
+            # Incremental append for new streaming deltas
+            for ev in new_events:
+                if self.subagent_filter and ev.get("subagent_id") != self.subagent_filter and ev.get("trajectory_id") != self.subagent_filter:
+                    continue
+                step_type = ev.get("step_type")
+                if step_type == "UNKNOWN" and ev.get("message_type") in ("STEP_UPDATE", "TRAJECTORY_STATE_UPDATE"):
+                    if not ev.get("text") and not ev.get("thinking") and not ev.get("tool_name"):
+                        continue
+                self._add_event_node_to_tree(tree, ev)
+
+            # Auto-follow if enabled
             is_modal_active = len(self.screen_stack) > 1 or isinstance(self.screen, ModalScreen)
-            if self.is_following and not is_modal_active:
-                self.selected_event = ev
-                self._render_inspector_event(ev)
+            if self.is_following and not is_modal_active and new_events:
+                latest_ev = new_events[-1]
+                self.selected_event = latest_ev
+                self._render_inspector_event(latest_ev)
 
         tree.root.expand()
 
-    def _add_artifact_to_list(self, art: Dict[str, Any]) -> None:
+    def _add_artifact_to_list(self, art: Any) -> None:
         """Adds an artifact item to the interactive Artifacts ListView."""
+        if isinstance(art, str):
+            clean_path = art.replace("file://", "").strip()
+            exists = os.path.exists(clean_path)
+            art = {
+                "type": "markdown" if clean_path.endswith(".md") else "file",
+                "path": clean_path,
+                "filename": os.path.basename(clean_path),
+                "size_bytes": os.path.getsize(clean_path) if exists else 0,
+                "exists": exists,
+            }
+
         artifacts_list = self.query_one("#artifacts-list", ListView)
         icon = "🖼️ " if art["type"] == "image" else ("🎬 " if art["type"] == "video" else ("📄 " if art["type"] == "markdown" else "💻 "))
         size_kb = f"{art['size_bytes'] / 1024:.1f} KB" if art["size_bytes"] > 0 else "0 KB"
@@ -1102,7 +1248,12 @@ class AgyWatchApp(App):
         t = Table.grid(padding=(0, 2))
         t.add_column(style="bold cyan", width=14)
         t.add_column()
-        t.add_row("Session ID:", str(ev.get("session_id") or "main"))
+        t.add_row("Session ID:", str(ev.get("session_id") or getattr(self.current_watcher, "session_id", "main")))
+        source_tag = getattr(self.current_watcher, "source_tag", None)
+        if not source_tag and self.current_watcher:
+            source_tag = "antigravity" if hasattr(self.current_watcher, "session_dir") else "sdk"
+        if source_tag:
+            t.add_row("Harness:", escape(f"[{source_tag}]"))
         t.add_row("Trajectory ID:", str(ev.get("trajectory_id") or "root"))
 
         children = ev.get("child_events") or []
@@ -1223,6 +1374,16 @@ class AgyWatchApp(App):
             art_t = Text()
             art_t.append("─── STEP ARTIFACTS & MEDIA (Press 'f' to view, 'o' for external) ───\n", style="bold green")
             for art in artifacts:
+                if isinstance(art, str):
+                    clean_path = art.replace("file://", "").strip()
+                    exists = os.path.exists(clean_path)
+                    art = {
+                        "type": "markdown" if clean_path.endswith(".md") else "file",
+                        "path": clean_path,
+                        "filename": os.path.basename(clean_path),
+                        "size_bytes": os.path.getsize(clean_path) if exists else 0,
+                        "exists": exists,
+                    }
                 status_icon = "🖼️ " if art["type"] == "image" else ("🎬 " if art["type"] == "video" else ("📄 " if art["type"] == "markdown" else "💻 "))
                 size_kb = f"{art['size_bytes'] / 1024:.1f} KB" if art["size_bytes"] > 0 else "0 KB"
                 exists_str = "[Found on disk]" if art["exists"] else "[Missing]"
@@ -1269,11 +1430,64 @@ class AgyWatchApp(App):
                         wrap_mode=self.settings.wrap_text,
                     ))
 
+    def action_load_earlier_steps(self) -> None:
+        """Expands the visible historical step window by 150 steps."""
+        if not self.current_session_id:
+            return
+        sid = self.current_session_id
+        curr = self.session_visible_counts.get(sid, 150)
+        self.session_visible_counts[sid] = curr + 150
+        self.step_nodes.clear()
+        self.subagent_branches.clear()
+        self.latest_invoke_node = None
+        try:
+            tree = self.query_one("#steps-tree", Tree)
+            tree.clear()
+            session = self.registry.get_session(sid, brain_root=self.brain_root)
+            tag = (session.get("source_tag") if session else None) or ("antigravity" if session and session.get("session_type") == "brain" else "sdk")
+            clean_title = re.sub(r"^\[.*?\]\s*", "", (session.get("title") if session else "Session") or "Session")
+            tree.root.set_label(f"Root Agent ({sid[:8]}) {escape(f'[{tag}]')} - {clean_title[:32]}")
+        except Exception:
+            pass
+        self.poll_live_updates()
+        self.notify(f"Showing up to {self.session_visible_counts[sid]} steps.")
+
+    def action_load_all_steps(self) -> None:
+        """Loads all historical steps into the tree."""
+        if not self.current_session_id:
+            return
+        sid = self.current_session_id
+        self.session_visible_counts[sid] = 999999
+        self.step_nodes.clear()
+        self.subagent_branches.clear()
+        self.latest_invoke_node = None
+        try:
+            tree = self.query_one("#steps-tree", Tree)
+            tree.clear()
+            session = self.registry.get_session(sid, brain_root=self.brain_root)
+            tag = (session.get("source_tag") if session else None) or ("antigravity" if session and session.get("session_type") == "brain" else "sdk")
+            clean_title = re.sub(r"^\[.*?\]\s*", "", (session.get("title") if session else "Session") or "Session")
+            tree.root.set_label(f"Root Agent ({sid[:8]}) {escape(f'[{tag}]')} - {clean_title[:32]}")
+        except Exception:
+            pass
+        self.poll_live_updates()
+        self.notify("Loaded all steps in session.")
+
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         """Handles tree node selection to inspect step payload and switch to Event Details tab."""
         if event.node.data:
+            if isinstance(event.node.data, dict) and event.node.data.get("type") == "PAGINATION_CONTROL":
+                self.action_load_earlier_steps()
+                return
             self.selected_event = event.node.data
-            self.is_following = False
+            if not getattr(self, "_internal_selecting", False):
+                self.is_following = False
+            if self.current_session_id:
+                traj_id = str(event.node.data.get("trajectory_id") or "main")
+                step_idx = event.node.data.get("step_index")
+                step_type = event.node.data.get("step_type")
+                self.session_selected_keys[self.current_session_id] = (traj_id, step_idx, step_type)
+
             if not self.is_modal_active:
                 self._render_inspector_event(event.node.data)
                 try:
@@ -1287,8 +1501,18 @@ class AgyWatchApp(App):
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         """Updates inspector and switches to Event Details tab as cursor navigates tree nodes."""
+        if getattr(self, "_internal_populating", False):
+            return
         if event.node.data:
+            if isinstance(event.node.data, dict) and event.node.data.get("type") == "PAGINATION_CONTROL":
+                return
             self.selected_event = event.node.data
+            if self.current_session_id:
+                traj_id = str(event.node.data.get("trajectory_id") or "main")
+                step_idx = event.node.data.get("step_index")
+                step_type = event.node.data.get("step_type")
+                self.session_selected_keys[self.current_session_id] = (traj_id, step_idx, step_type)
+
             if not self.is_modal_active:
                 self._render_inspector_event(event.node.data)
                 try:

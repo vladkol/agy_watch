@@ -20,6 +20,7 @@ Provides both an interactive Textual TUI dashboard and non-interactive subcomman
 
 import os
 import sys
+import re
 import json
 import time
 import shutil
@@ -42,28 +43,63 @@ def format_output(data: Any, fmt: str = "text") -> str:
     return str(data)
 
 
-@click.group(invoke_without_command=True)
+class DefaultGroup(click.Group):
+    """Custom Click Group allowing optional positional path or session arguments for default action."""
+    def parse_args(self, ctx: click.Context, args: List[str]) -> List[str]:
+        if args and args[0] not in self.commands and not args[0].startswith("-"):
+            ctx.params["target_path"] = args[0]
+            args = args[1:]
+        return super().parse_args(ctx, args)
+
+
+@click.group(cls=DefaultGroup, invoke_without_command=True)
 @click.option("--attach", "-a", "attach_id", type=str, default=None, help="Directly attach TUI to a specific session ID.")
 @click.option("--registry-db", type=click.Path(dir_okay=False), default=None, help="Custom registry.db path.")
 @click.version_option(version="0.1.0", prog_name="agy_watch")
 @click.pass_context
-def main(ctx: click.Context, attach_id: Optional[str], registry_db: Optional[str]) -> None:
-    """agy_watch: Antigravity SDK Observability Console."""
+def main(ctx: click.Context, attach_id: Optional[str], registry_db: Optional[str], target_path: Optional[str] = None) -> None:
+    """agy_watch: Real-time Observability Console for Antigravity & Gemini Agents."""
     if ctx.invoked_subcommand is None:
         # Default action: Launch interactive 3-pane Textual TUI
-        app = AgyWatchApp(initial_session_id=attach_id, registry_db=registry_db)
+        brain_root = "~/.gemini"
+        initial_id = attach_id
+
+        if target_path:
+            p = os.path.abspath(os.path.expanduser(target_path))
+            if os.path.isdir(p):
+                # Check if it's a specific session directory
+                full_log = os.path.join(p, ".system_generated", "logs", "transcript_full.jsonl")
+                short_log = os.path.join(p, ".system_generated", "logs", "transcript.jsonl")
+                if os.path.exists(full_log) or os.path.exists(short_log):
+                    initial_id = os.path.basename(p)
+                    brain_root = os.path.dirname(os.path.dirname(p))
+                elif os.path.isdir(os.path.join(p, "brain")):
+                    brain_root = p
+                else:
+                    brain_root = p
+            else:
+                # Treat as session ID prefix
+                initial_id = target_path
+
+        app = AgyWatchApp(
+            initial_session_id=initial_id,
+            registry_db=registry_db,
+            brain_root=brain_root,
+        )
         app.run()
 
 
 @main.command("list")
+@click.argument("target_path", required=False, default=None)
 @click.option("--status", type=click.Choice(["live", "idle", "all"], case_sensitive=False), default="all", help="Filter sessions by status.")
 @click.option("--limit", "-n", type=int, default=50, help="Maximum number of sessions to display.")
 @click.option("--json", "out_json", is_flag=True, help="Output as JSON.")
 @click.option("--yaml", "out_yaml", is_flag=True, help="Output as YAML.")
-def list_cmd(status: str, limit: int, out_json: bool, out_yaml: bool) -> None:
+def list_cmd(target_path: Optional[str], status: str, limit: int, out_json: bool, out_yaml: bool) -> None:
     """List all registered agent sessions on this machine."""
     registry = get_global_registry()
-    sessions = registry.list_sessions(limit=limit)
+    brain_root = target_path or "~/.gemini"
+    sessions = registry.list_sessions(limit=limit, brain_root=brain_root)
 
     if status == "live":
         sessions = [s for s in sessions if s.get("is_live")]
@@ -78,31 +114,34 @@ def list_cmd(status: str, limit: int, out_json: bool, out_yaml: bool) -> None:
         return
 
     if not sessions:
-        click.echo(click.style("No agent sessions found in registry (~/.antigravity/samples/agy_watch/registry.db).", fg="yellow"))
+        click.echo(click.style(f"No agent sessions found in registry or {brain_root}.", fg="yellow"))
         return
 
     from agy_watch.formatters import format_locale_datetime
 
-    click.echo(click.style(f"{'STATUS':<6} {'SESSION ID':<18} {'WORKERS':<8} {'TOKENS':<10} {'TITLE':<32} {'UPDATED'}", bold=True))
-    click.echo("─" * 102)
+    click.echo(click.style(f"{'STATUS':<6} {'SESSION ID':<18} {'SOURCE':<12} {'WORKERS':<8} {'TOKENS':<10} {'TITLE':<32} {'UPDATED'}", bold=True))
+    click.echo("─" * 114)
 
     for s in sessions:
         is_live = s.get("is_live", False)
-        status = s.get("status", "")
+        status_val = s.get("status", "")
         if is_live:
             status_emoji = "🟢"
-        elif status == "STATE_ERROR":
+        elif status_val == "STATE_ERROR":
             status_emoji = "🔴"
         else:
             status_emoji = "⚪"
 
         sid = s["session_id"][:16]
+        tag = f"[{s.get('source_tag', 'sdk')}]"
         workers = f"{s.get('subagent_count', 0)} subs"
-        tokens = f"{s.get('total_tokens', 0) / 1000:.1f}k tok"
-        title = (s.get("title") or "Session")[:30]
+        total_tokens = s.get("total_tokens", 0)
+        tokens = f"{total_tokens / 1000:.1f}k tok" if total_tokens > 0 else "-"
+        raw_title = s.get("title") or "Session"
+        clean_title = re.sub(r"^\[.*?\]\s*", "", raw_title)[:30]
         updated = format_locale_datetime(s.get("updated_at", 0), two_digit_year=True)
 
-        click.echo(f"  {status_emoji}    {sid:<18} {workers:<8} {tokens:<10} {title:<32} {updated}")
+        click.echo(f"  {status_emoji}    {sid:<18} {tag:<12} {workers:<8} {tokens:<10} {clean_title:<32} {updated}")
 
 
 @main.command("attach")
@@ -120,23 +159,28 @@ def attach_cmd(session_id: str) -> None:
 @click.option("--json", "out_json", is_flag=True, help="Stream events as JSON lines.")
 @click.option("--yaml", "out_yaml", is_flag=True, help="Output as YAML.")
 def tail_cmd(session_id: str, follow: bool, poll_interval: float, out_json: bool, out_yaml: bool) -> None:
-    """Stream live events from an active session's wire_tap.db."""
+    """Stream live events from an active session's wire_tap.db or brain transcript."""
     registry = get_global_registry()
     sess = registry.get_session(session_id)
 
     if not sess:
-        # Check if direct DB path was passed
         if os.path.exists(session_id) and session_id.endswith(".db"):
-            db_path = session_id
+            watcher = SessionWatcher(session_id)
+        elif os.path.isdir(session_id):
+            from agy_watch.brain_watcher import BrainTranscriptWatcher
+            watcher = BrainTranscriptWatcher(session_id)
         else:
             click.echo(click.style(f"Error: Session '{session_id}' not found in registry.", fg="red"), err=True)
             sys.exit(1)
     else:
-        db_path = sess["db_path"]
-
-    watcher = SessionWatcher(db_path)
+        if sess.get("session_type") == "brain" or os.path.isdir(sess.get("db_path", "")):
+            from agy_watch.brain_watcher import BrainTranscriptWatcher
+            watcher = BrainTranscriptWatcher(sess["workspace_dir"], source_tag=sess.get("source_tag", "gemini"))
+        else:
+            watcher = SessionWatcher(sess["db_path"])
 
     try:
+        from agy_watch.formatters import format_locale_time
         while True:
             sess_info, events = watcher.poll()
             for ev in events:
@@ -145,7 +189,8 @@ def tail_cmd(session_id: str, follow: bool, poll_interval: float, out_json: bool
                 elif out_yaml:
                     click.echo(yaml.dump([ev], sort_keys=False))
                 else:
-                    sub_tag = ev.get('subagent_id') or ev.get('trajectory_id') or 'sub'
+                    ts = format_locale_time(ev.get("timestamp"))
+                    sub_tag = ev.get("subagent_id") or ev.get("trajectory_id") or "sub"
                     actor = click.style("ROOT AGENT", fg="magenta", bold=True) if ev.get("is_main") else click.style(f"SUBAGENT ({str(sub_tag)[:8]})", fg="cyan", bold=True)
                     direction_arrow = ">>" if ev.get("direction") == "TO_HARNESS" else "<<"
                     stype = click.style(f"{ev.get('step_type'):<16}", fg="yellow", bold=True)
@@ -183,14 +228,20 @@ def inspect_cmd(session_id: str, step: Optional[int], out_json: bool, out_yaml: 
 
     if not sess:
         if os.path.exists(session_id) and session_id.endswith(".db"):
-            db_path = session_id
+            watcher = SessionWatcher(session_id)
+        elif os.path.isdir(session_id):
+            from agy_watch.brain_watcher import BrainTranscriptWatcher
+            watcher = BrainTranscriptWatcher(session_id)
         else:
             click.echo(click.style(f"Error: Session '{session_id}' not found.", fg="red"), err=True)
             sys.exit(1)
     else:
-        db_path = sess["db_path"]
+        if sess.get("session_type") == "brain" or os.path.isdir(sess.get("db_path", "")):
+            from agy_watch.brain_watcher import BrainTranscriptWatcher
+            watcher = BrainTranscriptWatcher(sess["workspace_dir"], source_tag=sess.get("source_tag", "gemini"))
+        else:
+            watcher = SessionWatcher(sess["db_path"])
 
-    watcher = SessionWatcher(db_path)
     sess_info, events = watcher.poll()
 
     if step is not None:
