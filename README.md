@@ -1,6 +1,6 @@
 # 👀 agy_watch
 
-**Antigravity SDK Observability Console**
+**Antigravity Observability Console**
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 [![Built with Textual](https://img.shields.io/badge/TUI-Textual-green.svg)](https://textual.textualize.io/)
@@ -8,11 +8,9 @@
 
 ## Welcome to agy_watch
 
-The [Google Antigravity SDK](https://github.com/google-antigravity/antigravity-sdk-python) makes it fast and intuitive to build autonomous AI agents, multi-agent swarms, and tool-augmented workflows. Antigravity SDK exposes a Python interface paired under the hood with a high-performance Go runtime (`localharness`) that executes model reasoning, tool invocations, and subagent lifecycles at high speed.
+`agy_watch` is a real-time observability console designed for [Google Antigravity](https://antigravity.google/) and the [Google Antigravity SDK](https://github.com/google-antigravity/antigravity-sdk-python).
 
-**`agy_watch` provides deep, real-time observability into your Antigravity agents' inner execution loops.**
-
-Whether you are debugging multi-agent coordination, inspecting subagent prompts, viewing Model Context Protocol (MCP) tools, or previewing generated code and media artifacts live, `agy_watch` lets you monitor the action directly from your terminal.
+Whether you are debugging multi-agent coordination, inspecting subagent swarms, auditing agent policies, checking tool calls, or previewing generated code and media artifacts live, `agy_watch` provides deep, interactive visibility into your agents' inner execution loops directly from your terminal.
 
 ![TUI Screenshot](docs/images/screenshot.jpg)
 
