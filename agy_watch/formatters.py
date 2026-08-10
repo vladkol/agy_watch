@@ -154,3 +154,35 @@ def format_locale_datetime(ts: Optional[float] = None, two_digit_year: bool = Tr
         time_fmt = "%I:%M:%S %p" if _IS_12_HOUR_LOCALE else "%H:%M:%S"
         date_fmt = "%y-%m-%d" if two_digit_year else "%Y-%m-%d"
         return datetime.fromtimestamp(ts or 0).strftime(f"{date_fmt} {time_fmt}")
+
+
+VALID_TEXTAREA_LANGUAGES = frozenset({
+    "markdown", "regex", "java", "html", "json", "go",
+    "xml", "toml", "javascript", "sql", "css", "yaml",
+    "rust", "python", "bash"
+})
+
+
+def normalize_textarea_language(lang: Optional[str]) -> Optional[str]:
+    """Normalizes a language identifier to a supported Tree-Sitter language in Textual TextArea, or None for plain text."""
+    if not lang:
+        return None
+    lang_lower = str(lang).lower().strip()
+    if lang_lower in ("text", "plain", "plaintext", "none", "txt", "raw", "null", ""):
+        return None
+    if lang_lower in ("py", "python3", "pyw"):
+        return "python"
+    if lang_lower in ("sh", "zsh", "shell", "console"):
+        return "bash"
+    if lang_lower in ("js", "ts", "typescript", "jsx", "tsx", "mjs", "cjs"):
+        return "javascript"
+    if lang_lower in ("yml",):
+        return "yaml"
+    if lang_lower in ("md", "mdown"):
+        return "markdown"
+    if lang_lower in ("htm",):
+        return "html"
+    if lang_lower in VALID_TEXTAREA_LANGUAGES:
+        return lang_lower
+    return None
+

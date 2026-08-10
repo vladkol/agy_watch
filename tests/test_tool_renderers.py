@@ -799,4 +799,67 @@ Additionally, your current permission grants are:
     assert "MCP RESOURCES: google-developer-knowledge" in rend_res
 
 
+def test_normalize_textarea_language():
+    """Verifies that normalize_textarea_language handles all aliases and prevents LanguageDoesNotExist."""
+    from agy_watch.formatters import normalize_textarea_language
+
+    assert normalize_textarea_language(None) is None
+    assert normalize_textarea_language("") is None
+    assert normalize_textarea_language("text") is None
+    assert normalize_textarea_language("plain") is None
+    assert normalize_textarea_language("txt") is None
+    assert normalize_textarea_language("raw") is None
+    assert normalize_textarea_language("none") is None
+    assert normalize_textarea_language("unknown_lang_foo") is None
+
+    # Supported and aliases
+    assert normalize_textarea_language("python") == "python"
+    assert normalize_textarea_language("py") == "python"
+    assert normalize_textarea_language("sh") == "bash"
+    assert normalize_textarea_language("bash") == "bash"
+    assert normalize_textarea_language("js") == "javascript"
+    assert normalize_textarea_language("ts") == "javascript"
+    assert normalize_textarea_language("json") == "json"
+    assert normalize_textarea_language("yaml") == "yaml"
+    assert normalize_textarea_language("yml") == "yaml"
+    assert normalize_textarea_language("md") == "markdown"
+    assert normalize_textarea_language("sql") == "sql"
+
+
+def test_extract_tool_card_parts_language_safety():
+    """Verifies extract_tool_card_parts never returns an invalid language for Textual TextArea."""
+    from agy_watch.tool_renderers import extract_tool_card_parts
+
+    # ask_question -> None
+    ev_q = {
+        "tool_name": "ask_question",
+        "tool_args": {"questions": [{"question": "Proceed?", "options": ["Yes", "No"]}]},
+    }
+    _, _, lang_q = extract_tool_card_parts(ev_q)
+    assert lang_q is None
+
+    # ask_permission -> None
+    ev_p = {
+        "tool_name": "ask_permission",
+        "tool_args": {"Action": "command", "Target": "git"},
+    }
+    _, _, lang_p = extract_tool_card_parts(ev_p)
+    assert lang_p is None
+
+    # run_command python vs bash
+    ev_cmd_py = {"tool_name": "run_command", "tool_args": {"CommandLine": "python test.py"}}
+    _, _, lang_cmd_py = extract_tool_card_parts(ev_cmd_py)
+    assert lang_cmd_py == "python"
+
+    ev_cmd_sh = {"tool_name": "run_command", "tool_args": {"CommandLine": "ls -la"}}
+    _, _, lang_cmd_sh = extract_tool_card_parts(ev_cmd_sh)
+    assert lang_cmd_sh == "bash"
+
+    # view_file with unknown extension -> None
+    ev_v_unknown = {"tool_name": "view_file", "tool_args": {"AbsolutePath": "/test.xyz123"}}
+    _, _, lang_v = extract_tool_card_parts(ev_v_unknown)
+    assert lang_v is None
+
+
+
 

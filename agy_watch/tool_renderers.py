@@ -1884,3 +1884,101 @@ def render_tool_event(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Rend
         elements.append(render_custom_tool(ev, syntax_theme=syntax_theme))
 
     return Group(*elements) if len(elements) > 1 else elements[0]
+
+
+def extract_tool_card_parts(ev: Dict[str, Any]) -> Tuple[RenderableType, str, Optional[str]]:
+    """Splits a tool call or policy event into a Rich header banner and a selectable code/text body."""
+    from agy_watch.formatters import normalize_textarea_language
+    tool_name = ev.get("tool_name") or ""
+    args = ev.get("tool_args") or {}
+    step_type = ev.get("step_type") or ""
+
+    if tool_name == "run_command":
+        cwd = args.get("Cwd") or "."
+        cmd = args.get("CommandLine") or ""
+        timeout = args.get("NotificationTimeoutSeconds")
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=18)
+        t.add_column()
+        t.add_row("Working Directory:", str(cwd))
+        if timeout:
+            t.add_row("Timeout:", f"{timeout}s")
+        header = Panel(t, title="[bold orange3]RUN COMMAND[/bold orange3]", border_style="orange3", padding=(0, 1))
+        lang = "python" if ("python" in cmd or ".py" in cmd) else "bash"
+        return header, str(cmd), normalize_textarea_language(lang)
+
+    elif tool_name in ("edit_file", "create_file", "write_to_file", "replace_file_content"):
+        target_file = args.get("TargetFile") or args.get("file_path") or args.get("path") or ""
+        instr = args.get("Instruction") or args.get("Description") or ""
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=18)
+        t.add_column()
+        t.add_row("Target File:", str(target_file))
+        if instr:
+            t.add_row("Instruction:", str(instr))
+        title = "EDIT FILE" if "edit" in tool_name or "replace" in tool_name else "CREATE FILE"
+        header = Panel(t, title=f"[bold green]{title}[/bold green]", border_style="green", padding=(0, 1))
+        content = args.get("ReplacementContent") or args.get("CodeContent") or args.get("content") or ""
+        lang = normalize_textarea_language(_guess_syntax_lexer(str(target_file)))
+        return header, str(content), lang
+
+    elif tool_name == "view_file":
+        target_file = args.get("AbsolutePath") or args.get("TargetFile") or args.get("path") or ""
+        start_line = args.get("StartLine")
+        end_line = args.get("EndLine")
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=18)
+        t.add_column()
+        t.add_row("Target File:", str(target_file))
+        if start_line is not None and end_line is not None:
+            t.add_row("Line Range:", f"L{start_line} - L{end_line}")
+        header = Panel(t, title="[bold cyan]VIEW FILE[/bold cyan]", border_style="cyan", padding=(0, 1))
+        payload_content = (ev.get("payload") or {}).get("content") or (ev.get("payload") or {}).get("output") or ""
+        lang = normalize_textarea_language(_guess_syntax_lexer(str(target_file)))
+        return header, str(payload_content), lang
+
+    elif tool_name == "ask_question":
+        questions = args.get("questions") or []
+        body_lines = []
+        for q in questions:
+            body_lines.append(f"❓ {q.get('question', '')}\n")
+            opts = q.get("options") or []
+            for opt in opts:
+                body_lines.append(f"   [ ] {opt}")
+            body_lines.append("")
+        header = Panel(Text("User interaction and options required", style="dim"), title="[bold chartreuse1]USER QUESTION & INTERACTION[/bold chartreuse1]", border_style="chartreuse1", padding=(0, 1))
+        return header, "\n".join(body_lines).strip(), None
+
+    elif tool_name == "ask_permission":
+        action = args.get("Action") or ""
+        target = args.get("Target") or ""
+        reason = args.get("Reason") or ""
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=14)
+        t.add_column()
+        t.add_row("Action:", str(action))
+        t.add_row("Target:", str(target))
+        if reason:
+            t.add_row("Reason:", str(reason))
+        header = Panel(t, title="[bold yellow]PERMISSION REQUEST[/bold yellow]", border_style="yellow", padding=(0, 1))
+        return header, f"Action: {action}\nTarget: {target}\nReason: {reason}", None
+
+    elif tool_name == "send_message":
+        recipient = args.get("Recipient") or ""
+        msg = args.get("Message") or ""
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=14)
+        t.add_column()
+        t.add_row("Recipient:", str(recipient))
+        header = Panel(t, title="[bold orchid]SEND MESSAGE[/bold orchid]", border_style="orchid", padding=(0, 1))
+        return header, str(msg), "markdown"
+
+    else:
+        # Generic tool fallback
+        header = Panel(Text(f"Arguments & payload for {tool_name or step_type or 'Tool'}", style="dim"), title=f"[bold cyan]TOOL: {tool_name or step_type or 'GENERIC'}[/bold cyan]", border_style="cyan", padding=(0, 1))
+        try:
+            body = json.dumps(args or ev.get("payload") or {}, indent=2)
+        except Exception:
+            body = str(args or ev.get("payload") or "")
+        return header, body, "json"
+
