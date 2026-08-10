@@ -373,13 +373,29 @@ class WireTapDB:
             except (ValueError, TypeError):
                 return 0
 
-        if "usageMetadata" in payload or "usage_metadata" in payload:
+        um = None
+        if "usageUpdate" in payload or "usage_update" in payload:
+            uu = payload.get("usageUpdate") or payload.get("usage_update") or {}
+            um = uu.get("total") or {}
+            msg_type = "USAGE_UPDATE"
+        elif "usageMetadata" in payload or "usage_metadata" in payload:
             um = payload.get("usageMetadata") or payload.get("usage_metadata") or {}
-            self.total_tokens += _to_int(um.get("totalTokenCount") or um.get("total_token_count"))
-            self.prompt_tokens += _to_int(um.get("promptTokenCount") or um.get("prompt_token_count"))
-            self.candidates_tokens += _to_int(um.get("candidatesTokenCount") or um.get("candidates_token_count"))
-            self.thoughts_tokens += _to_int(um.get("thoughtsTokenCount") or um.get("thoughts_token_count"))
-            self.cached_tokens += _to_int(um.get("cachedContentTokenCount") or um.get("cached_content_token_count"))
+        elif "initializeConversationResponse" in payload or "initialize_conversation_response" in payload:
+            ic = payload.get("initializeConversationResponse") or payload.get("initialize_conversation_response") or {}
+            um = ic.get("cumulativeUsage") or ic.get("cumulative_usage") or {}
+
+        if um:
+            tot = _to_int(um.get("totalTokenCount") or um.get("total_token_count"))
+            pr = _to_int(um.get("promptTokenCount") or um.get("prompt_token_count"))
+            cand = _to_int(um.get("candidatesTokenCount") or um.get("candidates_token_count"))
+            th = _to_int(um.get("thoughtsTokenCount") or um.get("thoughts_token_count"))
+            cd = _to_int(um.get("cachedContentTokenCount") or um.get("cached_content_token_count"))
+            if tot > 0 or pr > 0 or cand > 0:
+                self.total_tokens = tot if tot > 0 else (pr + cand)
+                self.prompt_tokens = pr
+                self.candidates_tokens = cand
+                self.thoughts_tokens = th
+                self.cached_tokens = cd
 
         offloaded_payload = self.blob_store.maybe_offload(payload)
         payload_json = json.dumps(offloaded_payload)
@@ -801,6 +817,27 @@ def read_trajectory(db_path: str) -> Dict[str, Any]:
                             prev_ev["payload"]["stepUpdate"] = {}
                         prev_ev["payload"]["stepUpdate"]["responseJson"] = resp_json
                     break
+        if "usageUpdate" in payload or "usage_update" in payload or msg_type == "USAGE_UPDATE":
+            uu = payload.get("usageUpdate") or payload.get("usage_update") or {}
+            um = uu.get("total") or {}
+            event["step_type"] = "USAGE_UPDATE"
+            def _to_int_val(v: Any) -> int:
+                try:
+                    return int(v) if v is not None else 0
+                except Exception:
+                    return 0
+            pr = _to_int_val(um.get("promptTokenCount") or um.get("prompt_token_count"))
+            cand = _to_int_val(um.get("candidatesTokenCount") or um.get("candidates_token_count"))
+            th = _to_int_val(um.get("thoughtsTokenCount") or um.get("thoughts_token_count"))
+            cd = _to_int_val(um.get("cachedContentTokenCount") or um.get("cached_content_token_count"))
+            tot = _to_int_val(um.get("totalTokenCount") or um.get("total_token_count"))
+            event["tokens"] = {
+                "prompt_tokens": pr,
+                "cached_tokens": cd,
+                "candidates_tokens": cand,
+                "thoughts_tokens": th,
+                "total_tokens": tot if tot > 0 else (pr + cand),
+            }
             events.append(event)
             continue
 

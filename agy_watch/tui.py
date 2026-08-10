@@ -617,7 +617,7 @@ class AgyWatchApp(App):
         border-bottom: solid $border-blurred;
         background: $surface;
         padding: 0 1;
-        margin-bottom: 0;
+        margin-bottom: 1;
     }
 
     .tool-selectable {
@@ -714,10 +714,8 @@ class AgyWatchApp(App):
                 yield Static(" EVENT & ARTIFACT INSPECTOR ", classes="pane-title")
                 with TabbedContent(id="inspector-tabs"):
                     with TabPane("Event Details", id="tab-details"):
-                        # Pinned non-scrolling metadata header
-                        yield SelectableTextArea("Select an event from the timeline to view details.", id="inspector-meta", classes="meta-selectable", language="yaml", read_only=True, show_line_numbers=False)
-                        # Scrollable body for tool cards, prompts, responses, reasoning, JSON payload, artifacts
                         with VerticalScroll(id="inspector-scroll"):
+                            yield SelectableTextArea("Select an event from the timeline to view details.", id="inspector-meta", classes="meta-selectable", language="yaml", read_only=True, show_line_numbers=False)
                             yield Static("", id="inspector-prompt-title", classes="section-title")
                             yield SelectableTextArea("", id="inspector-prompt-area", classes="selectable-area", read_only=True, show_line_numbers=False)
                             yield Static("", id="inspector-tool-header")
@@ -1490,11 +1488,11 @@ class AgyWatchApp(App):
 
         # 1. Prompt (User prompt, subagent instruction prompt, or image prompt)
         prompt_text = ev.get("prompt")
-        if not prompt_text and (tool_name == "generate_image" or "prompt" in args or "Prompt" in args):
+        if not prompt_text and (tool_name in ("generate_image", "generateImage") or ev.get("step_type") in ("USER_INPUT", "SUBAGENT_PROMPT")):
             prompt_text = args.get("prompt") or args.get("Prompt")
 
-        if prompt_text:
-            header_title = "SUBAGENT INSTRUCTION PROMPT" if ev.get("step_type") == "SUBAGENT_PROMPT" else ("GENERATED IMAGE PROMPT" if tool_name == "generate_image" else "USER PROMPT")
+        if prompt_text and (ev.get("step_type") in ("USER_INPUT", "SUBAGENT_PROMPT") or tool_name in ("generate_image", "generateImage")):
+            header_title = "SUBAGENT INSTRUCTION PROMPT" if ev.get("step_type") == "SUBAGENT_PROMPT" else ("GENERATED IMAGE PROMPT" if tool_name in ("generate_image", "generateImage") else "USER PROMPT")
             p_title.display = True
             p_title.update(f"─── {header_title} (Selectable) ───")
             p_area.display = True

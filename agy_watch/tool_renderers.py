@@ -1973,6 +1973,142 @@ def extract_tool_card_parts(ev: Dict[str, Any]) -> Tuple[RenderableType, str, Op
         header = Panel(t, title="[bold orchid]SEND MESSAGE[/bold orchid]", border_style="orchid", padding=(0, 1))
         return header, str(msg), "markdown"
 
+    elif tool_name in ("search_web", "searchWeb"):
+        query = args.get("query") or ""
+        domain = args.get("domain") or ""
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=14)
+        t.add_column()
+        t.add_row("Query:", str(query))
+        if domain:
+            t.add_row("Domain:", str(domain))
+        header = Panel(t, title="[bold sky_blue3]SEARCH WEB[/bold sky_blue3]", border_style="sky_blue3", padding=(0, 1))
+        summary = (ev.get("payload") or {}).get("summary") or ev.get("text") or query
+        return header, str(summary), "markdown"
+
+    elif tool_name in ("read_url_content", "readUrlContent"):
+        url = args.get("Url") or args.get("url") or ""
+        title = args.get("title") or (ev.get("payload") or {}).get("title") or ""
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=14)
+        t.add_column()
+        t.add_row("URL:", str(url))
+        if title:
+            t.add_row("Title:", str(title))
+        header = Panel(t, title="[bold medium_purple3]READ URL CONTENT[/bold medium_purple3]", border_style="medium_purple3", padding=(0, 1))
+        content = (ev.get("payload") or {}).get("content") or (ev.get("payload") or {}).get("summary") or ev.get("text") or ""
+        return header, str(content), "markdown"
+
+    elif tool_name in ("generate_image", "generateImage"):
+        prompt = args.get("Prompt") or args.get("prompt") or ""
+        img_name = args.get("ImageName") or args.get("image_name") or ""
+        aspect = args.get("AspectRatio") or args.get("aspect_ratio") or "1:1"
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=14)
+        t.add_column()
+        if img_name:
+            t.add_row("Image Name:", str(img_name))
+        t.add_row("Aspect Ratio:", str(aspect))
+        header = Panel(t, title="[bold medium_violet_red]GENERATE IMAGE[/bold medium_violet_red]", border_style="medium_violet_red", padding=(0, 1))
+        return header, str(prompt), None
+
+    elif tool_name in ("finish", "ActionFinish"):
+        out_str = args.get("output_string") or (ev.get("payload") or {}).get("output_string") or ev.get("text") or ""
+        header = Panel(Text("Agent execution finished.", style="bold green"), title="[bold chartreuse1]AGENT FINISH[/bold chartreuse1]", border_style="chartreuse1", padding=(0, 1))
+        return header, str(out_str), "markdown"
+
+    elif tool_name in ("list_dir", "list_directory", "listDirectory"):
+        dir_path = args.get("DirectoryPath") or args.get("directory_path") or "."
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=16)
+        t.add_column()
+        t.add_row("Directory Path:", str(dir_path))
+        header = Panel(t, title="[bold deep_sky_blue1]LIST DIRECTORY[/bold deep_sky_blue1]", border_style="deep_sky_blue1", padding=(0, 1))
+        results = (ev.get("payload") or {}).get("results") or ev.get("text") or ""
+        return header, str(results), None
+
+    elif tool_name in ("search_dir", "search_directory", "searchDirectory", "grep_search"):
+        dir_path = args.get("SearchPath") or args.get("DirectoryPath") or args.get("directory_path") or "."
+        query = args.get("Query") or args.get("query") or ""
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=16)
+        t.add_column()
+        t.add_row("Search Path:", str(dir_path))
+        t.add_row("Query Pattern:", str(query))
+        header = Panel(t, title="[bold deep_sky_blue3]SEARCH DIRECTORY / GREP[/bold deep_sky_blue3]", border_style="deep_sky_blue3", padding=(0, 1))
+        results = (ev.get("payload") or {}).get("output") or ev.get("text") or ""
+        return header, str(results), None
+
+    elif tool_name in ("find_file", "findFile", "find_by_name"):
+        dir_path = args.get("SearchDirectory") or args.get("directory_path") or "."
+        pattern = args.get("Pattern") or args.get("query") or ""
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=16)
+        t.add_column()
+        t.add_row("Directory:", str(dir_path))
+        t.add_row("File Pattern:", str(pattern))
+        header = Panel(t, title="[bold dark_cyan]FIND FILE[/bold dark_cyan]", border_style="dark_cyan", padding=(0, 1))
+        results = (ev.get("payload") or {}).get("output") or ev.get("text") or ""
+        return header, str(results), None
+
+    elif tool_name == "define_subagent":
+        name = args.get("name") or ""
+        desc = args.get("description") or ""
+        sys_prompt = args.get("system_prompt") or ""
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=14)
+        t.add_column()
+        t.add_row("Subagent Name:", str(name))
+        t.add_row("Description:", str(desc))
+        header = Panel(t, title="[bold cyan]DEFINE SUBAGENT[/bold cyan]", border_style="cyan", padding=(0, 1))
+        return header, str(sys_prompt), "markdown"
+
+    elif tool_name == "schedule":
+        cron = args.get("CronExpression") or ""
+        dur = args.get("DurationSeconds") or ""
+        cond = args.get("TimerCondition") or "never"
+        prompt = args.get("Prompt") or ""
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=16)
+        t.add_column()
+        if cron:
+            t.add_row("Cron Schedule:", str(cron))
+        if dur:
+            t.add_row("Duration:", f"{dur}s")
+        t.add_row("Condition:", str(cond))
+        header = Panel(t, title="[bold green3]SCHEDULE TASK / TIMER[/bold green3]", border_style="green3", padding=(0, 1))
+        return header, str(prompt), "markdown"
+
+    elif tool_name == "manage_task":
+        action = args.get("Action") or ""
+        task_id = args.get("TaskId") or ""
+        inp = args.get("Input") or ""
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=14)
+        t.add_column()
+        t.add_row("Action:", str(action))
+        if task_id:
+            t.add_row("Task ID:", str(task_id))
+        header = Panel(t, title="[bold cyan3]MANAGE TASK[/bold cyan3]", border_style="cyan3", padding=(0, 1))
+        content = inp or (ev.get("payload") or {}).get("output") or ev.get("text") or ""
+        return header, str(content), None
+
+    elif tool_name in ("call_mcp_tool", "ActionMcpTool") or ev.get("step_type") == "MCP_TOOL":
+        srv = args.get("ServerName") or args.get("server_name") or ""
+        t_name = args.get("ToolName") or args.get("tool_name") or ""
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=14)
+        t.add_column()
+        t.add_row("MCP Server:", str(srv))
+        t.add_row("MCP Tool:", str(t_name))
+        header = Panel(t, title="[bold deep_pink3]MCP TOOL[/bold deep_pink3]", border_style="deep_pink3", padding=(0, 1))
+        mcp_args = args.get("Arguments") or args.get("arguments_json") or args
+        try:
+            body = json.dumps(mcp_args, indent=2) if isinstance(mcp_args, (dict, list)) else str(mcp_args)
+        except Exception:
+            body = str(mcp_args)
+        return header, body, "json"
+
     else:
         # Generic tool fallback
         header = Panel(Text(f"Arguments & payload for {tool_name or step_type or 'Tool'}", style="dim"), title=f"[bold cyan]TOOL: {tool_name or step_type or 'GENERIC'}[/bold cyan]", border_style="cyan", padding=(0, 1))

@@ -1,7 +1,7 @@
 # agy_watch: Protocol & System Internals
 
 > [!IMPORTANT]
-> **Disclaimer**: `agy_watch` is a personal developer debugging and observability tool and is **NOT an official Google product or framework**. It is designed for testing, inspecting, and profiling autonomous agents built with [`google-antigravity==0.1.9`](https://pypi.org/project/google-antigravity/) and its bundled `localharness` binary.
+> **Disclaimer**: `agy_watch` is a personal developer debugging and observability tool and is **NOT an official Google product or framework**. It is designed for testing, inspecting, and profiling autonomous agents built with [`google-antigravity==0.1.10`](https://pypi.org/project/google-antigravity/) and its bundled `localharness` binary.
 > The tool is built by Antigravity itself by observing Antigravity SDK and localharness protocol.
 > There is no guarantee for this tool to work prior or beyond this version.
 > If any changes are required, you are welcome to file an issue and/or make a Pull Request.
@@ -23,7 +23,7 @@
 ┌───────────────────────────────────────┐       ┌───────────────────────────────────────┐
 │ ENGINE 1: SDK Agent Sessions ([sdk])  │       │ ENGINE 2: App Sessions ([antigravity])│
 │ - Custom Python / Multi-Lang Agents   │       │ - Native Antigravity IDE Agent & CLI  │
-│ - Loopback WebSocket Wire-Tap Hook    │       │ - Hybrid SQLite + Archival JSONL Stream│
+│ - Loopback WebSocket Wire-Tap Hook    │       │ - Hybrid SQLite + full JSONL Stream   │
 │ - SQLite WAL Database (wire_tap.db)   │       │ - Zero-Latency Cancellation Authority │
 │ - Content-Addressable Blob Storage    │       │ - Protobuf Varint Token Extraction    │
 └───────────────────────────────────────┘       └───────────────────────────────────────┘
@@ -38,7 +38,7 @@ The [Google Antigravity SDK](https://github.com/google-antigravity/antigravity-s
 ```text
 ┌──────────────────────────────────────┐          Loopback WebSocket IPC          ┌──────────────────────────┐
 │ Antigravity SDK (e.g. Python Process)│ ◄──────────────────────────────────────► │ localharness (Go Daemon) │
-│ - Agent Orchestration               │          ws://127.0.0.1:<port>           │ - Model Reasoning        │
+│ - Agent Orchestration                │          ws://127.0.0.1:<port>           │ - Model Reasoning        │
 │ - Tool Callbacks & MCP Transports    │          Protobuf / JSON Wire Frames     │ - Subagent Trajectories  │
 │ - Security Policy Callbacks          │                                          │ - Execution Sandboxes    │
 └──────────────────────────────────────┘                                          └──────────────────────────┘
