@@ -1004,12 +1004,13 @@ class AgyWatchApp(App):
                         _populate_child_nodes(node, children)
                     else:
                         node = sub_branch.add_leaf(label, data=ev)
-                    if step_idx is not None:
-                        self.step_nodes[step_key] = node
-
-                    state = ev.get("state") or ev.get("payload", {}).get("stepUpdate", {}).get("state")
-                    if state in ("STATE_DONE", "STATE_ERROR"):
-                        sub_branch.set_label(f"🤖 [bold cyan]Subagent ({str(sub_id)[:8]})[/bold cyan] [{state[6:]}]")
+                    tool_n = ev.get("tool_name") or ""
+                    st_type = ev.get("step_type") or ""
+                    is_term = ev.get("is_terminal") or ev.get("subagent_report") is not None
+                    if is_term or st_type == "SUBAGENT_REPORT" or tool_n in ("finish", "complete_task"):
+                        sub_branch.set_label(f"🤖 [bold cyan]Subagent ({str(sub_id)[:8]})[/bold cyan] [DONE]")
+                    elif ev.get("state") == "STATE_ERROR":
+                        sub_branch.set_label(f"🤖 [bold cyan]Subagent ({str(sub_id)[:8]})[/bold cyan] [ERROR]")
 
         return node
 
@@ -1038,12 +1039,22 @@ class AgyWatchApp(App):
                 return
 
             # Update session-level artifacts
+            has_new_artifacts = False
             for ev in new_events:
                 for art in ev.get("artifacts", []):
                     p = art["path"]
                     if p not in self.seen_artifact_paths:
                         self.seen_artifact_paths.add(p)
                         self.session_artifacts.append(art)
+                        has_new_artifacts = True
+
+            if has_new_artifacts:
+                try:
+                    tabs = self.query_one("#inspector-tabs", TabbedContent)
+                    if tabs.active == "tab-artifacts":
+                        self._populate_artifacts_tab()
+                except Exception:
+                    pass
 
             all_session_events = self.session_events_store[sid]
             visible_limit = self.session_visible_counts.get(sid, 150)
@@ -1188,6 +1199,16 @@ class AgyWatchApp(App):
                     session_info.get("step_count", 0) or len(all_session_events)
                 )
 
+            # Keep timeline title status updated
+            mode_str = "Tree" if self.tree_mode else "Flat"
+            current_status = session_info.get("status", "STATE_DONE")
+            try:
+                self.query_one("#timeline-title", Static).update(
+                    f" EXECUTION ({mode_str}): {sid[:8]} ({current_status}) "
+                )
+            except Exception:
+                pass
+
             tree.root.expand()
         except Exception:
             pass
@@ -1241,10 +1262,13 @@ class AgyWatchApp(App):
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Handles inspector tab activations, lazily populating tab content."""
         if event.tabbed_content.id == "inspector-tabs":
-            tab_id = event.tab.id.replace("--tab-", "") if event.tab.id else ""
-            self.settings.active_tab = tab_id
-            self.settings.save()
-            if tab_id == "tab-artifacts":
+            pane_id = getattr(event.pane, "id", None) or event.tabbed_content.active
+            if not pane_id and event.tab and event.tab.id:
+                pane_id = event.tab.id.replace("--content-tab-", "").replace("--tab-", "")
+            if pane_id:
+                self.settings.active_tab = pane_id
+                self.settings.save()
+            if pane_id == "tab-artifacts" or event.tabbed_content.active == "tab-artifacts":
                 self._populate_artifacts_tab()
 
     def _add_artifact_to_list(self, art: Any) -> None:
@@ -1918,6 +1942,7 @@ class AgyWatchApp(App):
             if tabs.active == "tab-details":
                 tabs.active = "tab-artifacts"
                 self.settings.active_tab = "tab-artifacts"
+                self._populate_artifacts_tab()
                 self.notify("Switched to Artifacts & Files tab.")
             else:
                 tabs.active = "tab-details"

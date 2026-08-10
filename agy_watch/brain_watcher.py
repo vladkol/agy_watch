@@ -694,7 +694,10 @@ def _get_authoritative_brain_session_status(conv_db_path: str, is_recent: bool) 
     try:
         mtime = os.path.getmtime(conv_db_path)
         if conv_db_path in _conv_db_status_cache and _conv_db_status_cache[conv_db_path][0] == mtime:
-            return (_conv_db_status_cache[conv_db_path][1], _conv_db_status_cache[conv_db_path][2])
+            cached_status, _ = _conv_db_status_cache[conv_db_path][1], _conv_db_status_cache[conv_db_path][2]
+            if cached_status in ("STATE_CANCELLED", "STATE_ERROR"):
+                return (cached_status, False)
+            return ("STATE_RUNNING" if is_recent else "STATE_DONE", is_recent)
 
         import sqlite3
         conn = sqlite3.connect(f"file:{conv_db_path}?mode=ro", uri=True)
@@ -711,7 +714,7 @@ def _get_authoritative_brain_session_status(conv_db_path: str, is_recent: bool) 
             elif db_status == 2:
                 res = ("STATE_RUNNING", True)
             elif db_status == 3:
-                res = ("STATE_DONE", False)
+                res = ("STATE_RUNNING" if is_recent else "STATE_DONE", is_recent)
 
         _conv_db_status_cache[conv_db_path] = (mtime, res[0], res[1])
         return res

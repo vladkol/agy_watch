@@ -298,6 +298,8 @@ async def test_tui_app_mount_and_pilot_lifecycle():
             assert tabs.active == "tab-details"
             await pilot.press("a")      # Switch to Artifacts tab
             assert tabs.active == "tab-artifacts"
+            artifacts_list = app.query_one("#artifacts-list")
+            assert len(artifacts_list.children) > 0
             await pilot.press("a")      # Switch back to Details tab
             assert tabs.active == "tab-details"
 

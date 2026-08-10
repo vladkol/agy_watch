@@ -574,7 +574,12 @@ def extract_event_artifacts(
     artifacts: List[Dict[str, Any]] = []
     seen_paths: Set[str] = set()
 
-    def add_file_if_valid(p: str, kind: str = "file") -> None:
+    step_type = ev.get("step_type") or ev.get("message_type") or ""
+    # Skip synthetic system knowledge injections that contain loose slug references
+    if step_type in ("KNOWLEDGE_ARTIFACTS", "CONVERSATION_HISTORY", "CHECKPOINT"):
+        return artifacts
+
+    def add_file_if_valid(p: str, kind: str = "file", require_exists: bool = False) -> None:
         if not p:
             return
         clean_path = p.replace("file://", "").strip()
@@ -584,9 +589,16 @@ def extract_event_artifacts(
 
         if clean_path in seen_paths:
             return
-        seen_paths.add(clean_path)
 
         exists = os.path.exists(clean_path)
+        if require_exists and not exists:
+            return
+
+        # Discard single-segment bogus root paths like '/foo.md' that don't exist
+        if not exists and clean_path.count("/") <= 1:
+            return
+
+        seen_paths.add(clean_path)
         size = os.path.getsize(clean_path) if exists else 0
 
         ext = os.path.splitext(clean_path)[1].lower()
@@ -652,7 +664,7 @@ def extract_event_artifacts(
         if found_matches:
             found_matches.sort(key=os.path.getmtime, reverse=True)
             for m in found_matches[:1]:
-                add_file_if_valid(m, "image")
+                add_file_if_valid(m, "image", require_exists=True)
 
     # 2. Check editFile, createFile, viewFile arguments
     for k in (
@@ -660,7 +672,7 @@ def extract_event_artifacts(
         "AbsolutePath", "absolutePath", "absolute_path", "path",
     ):
         if k in tool_args and tool_args[k]:
-            add_file_if_valid(str(tool_args[k]))
+            add_file_if_valid(str(tool_args[k]), require_exists=False)
 
     # 3. Check for markdown image links in payload/text/prompt/thinking
     content_strings = [
@@ -673,21 +685,21 @@ def extract_event_artifacts(
     for c in content_strings:
         for match in img_pattern.finditer(c):
             matched_path = match.group(2)
-            add_file_if_valid(matched_path, "image")
+            add_file_if_valid(matched_path, "image", require_exists=True)
 
     # 4. Check for file:/// markdown links
     file_pattern = re.compile(r"file://(/[^\s\)\`\"']+)")
     for c in content_strings:
         for match in file_pattern.finditer(c):
             matched_path = match.group(1)
-            add_file_if_valid(matched_path)
+            add_file_if_valid(matched_path, require_exists=True)
 
     # 5. Check for raw file paths (including user uploads and media files)
     raw_path_pattern = re.compile(r"(/[^\s\)\`\"'<>]+?\.(?:png|jpg|jpeg|webp|gif|svg|mp3|wav|ogg|mp4|webm|pdf|md))\b", re.IGNORECASE)
     for c in content_strings:
         for match in raw_path_pattern.finditer(c):
             matched_path = match.group(1)
-            add_file_if_valid(matched_path)
+            add_file_if_valid(matched_path, require_exists=True)
 
     return artifacts
 

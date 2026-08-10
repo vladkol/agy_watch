@@ -582,9 +582,18 @@ class SessionTelemetryCache:
                     arts = json.loads(r["artifacts_json"] or "[]")
                     for a in arts:
                         path = a.get("path")
-                        if path and path not in seen_paths:
-                            seen_paths.add(path)
-                            artifacts.append(a)
+                        if not path or path in seen_paths:
+                            continue
+                        exists = os.path.exists(path)
+                        # Discard single-segment bogus root paths like '/foo.md' that don't exist
+                        if not exists and path.count("/") <= 1:
+                            continue
+                        if not exists and not a.get("exists"):
+                            continue
+                        a["exists"] = exists
+                        a["size_bytes"] = os.path.getsize(path) if exists else 0
+                        seen_paths.add(path)
+                        artifacts.append(a)
                 except Exception:
                     pass
         return artifacts
