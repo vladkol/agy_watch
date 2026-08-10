@@ -576,8 +576,12 @@ def extract_event_artifacts(
         ext = os.path.splitext(clean_path)[1].lower()
         if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"):
             kind = "image"
+        elif ext in (".mp3", ".wav", ".ogg", ".aac", ".flac", ".m4a"):
+            kind = "audio"
         elif ext in (".mp4", ".mov", ".webm", ".mkv"):
             kind = "video"
+        elif ext in (".pdf", ".docx", ".xlsx", ".csv"):
+            kind = "document"
         elif ext == ".md":
             kind = "markdown"
 
@@ -655,10 +659,17 @@ def extract_event_artifacts(
             matched_path = match.group(2)
             add_file_if_valid(matched_path, "image")
 
-    # 4. Check for file:/// markdown links or raw file paths
+    # 4. Check for file:/// markdown links
     file_pattern = re.compile(r"file://(/[^\s\)\`\"']+)")
     for c in content_strings:
         for match in file_pattern.finditer(c):
+            matched_path = match.group(1)
+            add_file_if_valid(matched_path)
+
+    # 5. Check for raw file paths (including user uploads and media files)
+    raw_path_pattern = re.compile(r"(/[^\s\)\`\"'<>]+?\.(?:png|jpg|jpeg|webp|gif|svg|mp3|wav|ogg|mp4|webm|pdf|md))\b", re.IGNORECASE)
+    for c in content_strings:
+        for match in raw_path_pattern.finditer(c):
             matched_path = match.group(1)
             add_file_if_valid(matched_path)
 

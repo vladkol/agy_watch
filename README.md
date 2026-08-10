@@ -19,8 +19,7 @@ Whether you are debugging multi-agent coordination, inspecting subagent swarms, 
 2. **Multi-Agent Swarm Tracking**: Visualize concurrent subagent workflows in a structured, hierarchical tree—tracking delegated instructions, worker reasoning, and nested tool calls in context.
 3. **End-to-End Tool & Policy Inspection**: Inspect complete input arguments, execution outputs, runtime exceptions, and security policy interceptions with rich dedicated visualizers for shell commands, code diffs, and MCP servers.
 4. **Live Workspace & Artifact Preview**: Review generated files, unified code diffs, markdown reports, and media assets in real time directly inside the terminal.
-5. **High-Performance Lazy Pagination**: Smooth 60 FPS rendering even for massive sessions with thousands of turns, with interactive on-demand paging (`u` / click) and persistent per-session selection memory.
-6. **Machine-Wide Discovery & Scriptable CLI**: Automatically track all local agent sessions from a unified dashboard, or stream structured JSON events into terminal pipelines and evaluation scripts.
+5. **Machine-Wide Discovery & Scriptable CLI**: Automatically track all local agent sessions from a unified dashboard, or stream structured JSON events into terminal pipelines and evaluation scripts.
 
 ---
 
@@ -30,7 +29,7 @@ Whether you are debugging multi-agent coordination, inspecting subagent swarms, 
 
 | Session Kind | Badge | Source & Capture Mechanism | Key Benefits |
 | :--- | :---: | :--- | :--- |
-| **Antigravity App Sessions** | `[antigravity]`<br>`[jetski]`<br>`[cli]` | Native **Antigravity Agent** (IDE extension), **Antigravity CLI**, and standalone harnesses. Automatically discovered from `~/.gemini/*/brain` or loaded from custom paths via live transcript streaming (`transcript.jsonl`). | Instant insight into agent reasoning, thoughts, user prompts, 2-step tool transactions (`PLANNER_RESPONSE` + tool outputs), generated files, and code diffs. |
+| **Antigravity App Sessions** | `[antigravity]`<br>`[antigravity-cli]`<br>`[antigravity-ide]` | Native **Antigravity Agent** (IDE extension), **Antigravity CLI**, and standalone harnesses. Automatically discovered from `~/.gemini/*/brain` or loaded from custom paths via live transcript streaming (`transcript.jsonl`). | Instant insight into agent reasoning, thoughts, user prompts, 2-step tool transactions (`PLANNER_RESPONSE` + tool outputs), generated files, and code diffs. |
 | **SDK Agent Sessions** | `[sdk]` | Custom agents and multi-agent swarms built with the `google-antigravity` Python SDK (or universal proxy). Wire-tapped via loopback WebSocket IPC (`wire_tap.db`). | Zero-code monitoring of custom agent workflows, MCP tools, subagent swarms, lifecycle policy hooks, and runtime approvals. |
 
 ---
@@ -49,9 +48,6 @@ Antigravity App sessions stored under `~/.gemini/*/brain` are **automatically di
 ```bash
 # Open a specific Antigravity app session directly in TUI
 agy_watch ~/.gemini/antigravity/brain/<session_id>
-
-# Open a custom brain or app directory
-agy_watch ~/my-project/.gemini/jetski/brain
 
 # List all discovered Antigravity app and SDK sessions
 agy_watch list
@@ -78,10 +74,10 @@ python my_agent.py
 * **Machine-Wide Unified Dashboard**: Automatically discovers active and historical SDK agents and Antigravity App sessions (IDE, Agent, and CLI) without manual configuration.
 * **Hierarchical Execution Tree**: Groups root agent and subagent swarms into collapsible branches, giving you immediate clarity on delegated tasks and tool flows.
 * **Dynamic Lazy Pagination & Selection Memory**: Opens instantly focused on the **most recent event**, maintaining smooth 60 FPS scrolling on 5,000+ turn sessions with on-demand expansion (`u` or click) and persistent per-session selection memory.
-* **First-Class Visualizers for Common Tools**: Dedicated, human-readable visualizers for shell commands (with exit codes and terminal output), file edits (with syntax-colored unified diffs), search directories, image generation, interactive user questions, and MCP tools.
+* **First-Class Visualizers for Common Tools**: Dedicated, human-readable visualizers for shell commands (with exit codes and terminal output), file edits (with syntax-colored unified diffs), subagent blueprints, inter-agent messaging, background task controllers & schedulers, security sandbox permissions, browser sessions, and MCP tools.
 * **Security Policy & Error Interception**: Clearly identifies blocked actions, policy denial reasons, and tool runtime exceptions with prominent diagnostic cards.
 * **In-Terminal Artifact & Diff Viewer**: Instant syntax-highlighted previews for code, markdown documents, and images as soon as agents create or update them in their workspace.
-* **Real-Time Live Streaming & Follow Mode**: Watch thoughts, streaming tokens, and execution steps render live as the model generates them, with auto-scroll and pause controls.
+* **Smart Auto-Follow & Auto-Scroll**: Real-time events automatically scroll into view as the model generates them. Scrolling back to read earlier steps automatically pauses follow so your view is never interrupted, and scrolling back to the bottom instantly resumes live auto-follow.
 * **Non-Interactive CLI for Scripting & CI/CD**: Query past runs, tail active sessions, and inspect step payloads in JSON or YAML format for automated evaluation pipelines.
 
 ---
@@ -132,7 +128,7 @@ uv sync
 `agy_watch` natively understands the Antigravity App session format (`transcript.jsonl` / `transcript_full.jsonl`) generated by Antigravity Agent, IDE extensions, and the Antigravity CLI.
 
 ### Automatic Discovery
-By default, `agy_watch` automatically scans all subdirectories in `~/.gemini/*/brain` (such as `~/.gemini/antigravity`, `~/.gemini/jetski`, and any custom app workspace), displaying live and completed sessions with their source tags in the session switcher.
+By default, `agy_watch` automatically scans all subdirectories in `~/.gemini/*/brain` (such as `~/.gemini/antigravity`, `~/.gemini/antigravity-cli`, `~/.gemini/antigravity-ide`, and any custom app workspace), displaying live and completed sessions with their source tags in the session switcher.
 
 ### Targeted Inspection
 You can target specific sessions or custom workspace locations directly from the CLI:

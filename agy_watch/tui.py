@@ -469,9 +469,19 @@ class AgyWatchApp(App):
     }
 
     #sessions-list > ListItem.--highlight {
-        background: $primary-darken-2;
-        border-left: solid $accent;
+        background: $boost;
+        border-left: solid $primary;
+    }
+
+    #sessions-list > ListItem.active-session {
+        background: $boost;
+        border-left: wide $accent;
         border-bottom: solid $accent;
+    }
+
+    #sessions-list > ListItem.active-session:hover {
+        background: $surface-lighten-1;
+        border-left: wide $accent;
     }
 
     #tree-container {
@@ -618,6 +628,7 @@ class AgyWatchApp(App):
         self.session_events_store: Dict[str, List[Dict[str, Any]]] = {}
         self.session_visible_counts: Dict[str, int] = {}
         self.session_selected_keys: Dict[str, Tuple[str, Any, str]] = {}
+        self.session_last_seen_step_count: Dict[str, int] = {}
         self.pagination_top_node: Optional[TreeNode] = None
 
         # Step deduplication and hierarchy tracking
@@ -707,7 +718,10 @@ class AgyWatchApp(App):
             return
 
         sessions = self.registry.list_sessions(brain_root=self.brain_root)
-        new_sig = tuple((s["session_id"], s["updated_at"], s["status"], s["total_tokens"], s["step_count"]) for s in sessions)
+        new_sig = tuple(
+            (s["session_id"], s["updated_at"], s["status"], s["total_tokens"], s["step_count"], (s["session_id"] == self.current_session_id))
+            for s in sessions
+        )
 
         if not force and new_sig == self._last_sessions_sig:
             return
@@ -723,12 +737,15 @@ class AgyWatchApp(App):
         from agy_watch.formatters import format_locale_datetime, format_locale_time
 
         for s in sessions:
+            is_active = (s["session_id"] == self.current_session_id)
             is_live = s.get("is_live", False)
             status = s.get("status", "")
             if is_live:
                 status_emoji = "🟢"
             elif status == "STATE_ERROR":
                 status_emoji = "🔴"
+            elif status == "STATE_CANCELLED":
+                status_emoji = "🛑"
             else:
                 status_emoji = "⚪"
 
@@ -761,12 +778,23 @@ class AgyWatchApp(App):
             else:
                 tag_badge = f"[bold blue]{escape(f'[{source_tag}]')}[/bold blue]"
 
+            if is_active:
+                prefix = f"[bold cyan]▶[/bold cyan] {status_emoji}"
+                sid_style = "bold white"
+            else:
+                prefix = f"  {status_emoji}"
+                sid_style = "white"
+
             item_text = (
-                f"{status_emoji} [bold white]{s['session_id'][:8]}[/bold white] {tag_badge}  [dim]{time_str}[/dim]\n"
-                f" [bright_cyan]{title_snippet}[/bright_cyan]\n"
-                f" {metrics_line}"
+                f"{prefix} [{sid_style}]{s['session_id'][:8]}[/{sid_style}] {tag_badge}  [dim]{time_str}[/dim]\n"
+                f"   [bright_cyan]{title_snippet}[/bright_cyan]\n"
+                f"   {metrics_line}"
             )
-            item = ListItem(Static(item_text), name=s["session_id"])
+            item = ListItem(
+                Static(item_text),
+                name=s["session_id"],
+                classes="active-session" if is_active else "",
+            )
             list_view.append(item)
 
         # Select initial or last saved session
@@ -820,6 +848,7 @@ class AgyWatchApp(App):
         tree = self.query_one("#steps-tree", Tree)
         tree.clear()
         tree.root.set_label(f"Root Agent ({session_id[:8]}) {escape(f'[{tag}]')} - {clean_title[:32]}")
+        tree.root.data = {"type": "ROOT_SESSION", "session_id": session_id}
         mode_str = "Tree" if self.tree_mode else "Flat"
         self.query_one("#timeline-title", Static).update(f" EXECUTION ({mode_str}): {session_id[:8]} ({session['status']}) ")
 
@@ -834,6 +863,22 @@ class AgyWatchApp(App):
             pass
 
         self.poll_live_updates()
+        self.refresh_sessions_list(force=True)
+
+    def _focus_and_scroll_node(self, tree: Tree, node: TreeNode, align_to_bottom: bool = True) -> None:
+        """Safely moves cursor and scrolls to a node after Textual computes layout line coordinates."""
+        if not node:
+            return
+        self._internal_populating = True
+        try:
+            tree.move_cursor(node)
+            tree.scroll_to_node(node, animate=False)
+            if align_to_bottom:
+                tree.scroll_end(animate=False)
+        except Exception:
+            pass
+        finally:
+            self._internal_populating = False
 
     def _add_event_node_to_tree(self, tree: Tree, ev: Dict[str, Any]) -> Optional[TreeNode]:
         """Adds or updates a single event node in the tree."""
@@ -943,31 +988,68 @@ class AgyWatchApp(App):
                 if p not in self.seen_artifact_paths:
                     self.seen_artifact_paths.add(p)
                     self.session_artifacts.append(art)
-                    self._add_artifact_to_list(art)
 
         all_session_events = self.session_events_store[sid]
         visible_limit = self.session_visible_counts.get(sid, 150)
 
-        # Filter valid events
-        valid_events = []
-        for ev in all_session_events:
-            if self.subagent_filter and ev.get("subagent_id") != self.subagent_filter and ev.get("trajectory_id") != self.subagent_filter:
-                continue
-            step_type = ev.get("step_type")
-            if step_type == "UNKNOWN" and ev.get("message_type") in ("STEP_UPDATE", "TRAJECTORY_STATE_UPDATE"):
-                if not ev.get("text") and not ev.get("thinking") and not ev.get("tool_name"):
-                    continue
-            valid_events.append(ev)
+        # Detect live state and step changes since last visit
+        is_session_live = bool(
+            session_info.get("is_live")
+            or session_info.get("status") in ("STATE_ACTIVE", "STATE_RUNNING")
+        )
+        saved_key = self.session_selected_keys.get(sid)
+        last_seen_count = self.session_last_seen_step_count.get(sid, 0)
+        current_step_count = session_info.get("step_count", 0) or len(all_session_events)
+        has_new_events_since_visit = (current_step_count > last_seen_count)
 
-        total_valid = len(valid_events)
-        if total_valid > visible_limit:
-            display_events = valid_events[-visible_limit:]
-            has_earlier = True
-            earlier_count = total_valid - visible_limit
+        # Decide whether to restore historical position or jump to tail
+        restore_historical = bool(
+            saved_key is not None
+            and not is_session_live
+            and not has_new_events_since_visit
+        )
+
+        if restore_historical and hasattr(self.current_watcher, "get_window"):
+            saved_step_idx = saved_key[1] if isinstance(saved_key, tuple) and len(saved_key) > 1 else None
+            win = self.current_watcher.get_window(
+                limit=visible_limit,
+                center_on_step_index=saved_step_idx,
+                subagent_id=self.subagent_filter,
+            )
+            display_events = win["events"]
+            has_earlier = win["has_earlier"]
+            total_valid = win["total_count"]
+            earlier_count = max(0, total_valid - len(display_events))
+        elif hasattr(self.current_watcher, "get_window"):
+            win = self.current_watcher.get_window(
+                limit=visible_limit,
+                subagent_id=self.subagent_filter,
+            )
+            display_events = win["events"]
+            has_earlier = win["has_earlier"]
+            total_valid = win["total_count"]
+            earlier_count = max(0, total_valid - len(display_events))
         else:
-            display_events = valid_events
-            has_earlier = False
-            earlier_count = 0
+            # Fallback for SDK sessions
+            valid_events = []
+            for ev in all_session_events:
+                if self.subagent_filter and ev.get("subagent_id") != self.subagent_filter and ev.get("trajectory_id") != self.subagent_filter:
+                    continue
+                step_type = ev.get("step_type")
+                if step_type == "UNKNOWN" and ev.get("message_type") in ("STEP_UPDATE", "TRAJECTORY_STATE_UPDATE"):
+                    if not ev.get("text") and not ev.get("thinking") and not ev.get("tool_name"):
+                        continue
+                valid_events.append(ev)
+
+            total_valid = len(valid_events)
+            if total_valid > visible_limit:
+                display_events = valid_events[-visible_limit:]
+                has_earlier = True
+                earlier_count = total_valid - visible_limit
+            else:
+                display_events = valid_events
+                has_earlier = False
+                earlier_count = 0
 
         # If step_nodes is empty (initial attach or after pagination change), populate tree
         if not self.step_nodes:
@@ -987,30 +1069,33 @@ class AgyWatchApp(App):
 
                 tree.root.expand()
 
-                # Selection on open:
-                # If user previously selected a step in this session, restore selection
-                saved_key = self.session_selected_keys.get(sid)
-                if saved_key and saved_key in self.step_nodes:
-                    target_node = self.step_nodes[saved_key]
+                latest_node = list(self.step_nodes.values())[-1] if self.step_nodes else None
+
+                target_node = None
+                if restore_historical:
+                    if saved_key in self.step_nodes:
+                        target_node = self.step_nodes[saved_key]
+                    else:
+                        saved_step_idx = saved_key[1] if isinstance(saved_key, tuple) and len(saved_key) > 1 else saved_key
+                        for (t_id, s_idx, s_type), n in self.step_nodes.items():
+                            if s_idx == saved_step_idx:
+                                target_node = n
+                                break
+
+                if target_node and target_node.data:
                     self.selected_event = target_node.data
                     self.is_following = False
                     self._render_inspector_event(target_node.data)
-                    try:
-                        tree.scroll_to_node(target_node)
-                        tree.move_cursor(target_node)
-                    except Exception:
-                        pass
-                elif self.step_nodes:
-                    # First time opening session: select the most recent event (bottom-most)
-                    latest_node = list(self.step_nodes.values())[-1]
-                    if latest_node and latest_node.data:
-                        self.selected_event = latest_node.data
-                        self._render_inspector_event(latest_node.data)
-                        try:
-                            tree.scroll_to_node(latest_node)
-                            tree.move_cursor(latest_node)
-                        except Exception:
-                            pass
+                    self.call_after_refresh(self._focus_and_scroll_node, tree, target_node, False)
+                elif latest_node and latest_node.data:
+                    # Select the most recent event (bottom-most)
+                    self.selected_event = latest_node.data
+                    self.is_following = is_session_live
+                    self._render_inspector_event(latest_node.data)
+                    self.call_after_refresh(self._focus_and_scroll_node, tree, latest_node, True)
+
+                # Record current step count as seen
+                self.session_last_seen_step_count[sid] = current_step_count
             finally:
                 self._internal_populating = False
         else:
@@ -1024,42 +1109,83 @@ class AgyWatchApp(App):
                         continue
                 self._add_event_node_to_tree(tree, ev)
 
-            # Auto-follow if enabled
+            # Auto-follow if enabled: scroll all the way to bottom and focus latest node
             is_modal_active = len(self.screen_stack) > 1 or isinstance(self.screen, ModalScreen)
             if self.is_following and not is_modal_active and new_events:
                 latest_ev = new_events[-1]
                 self.selected_event = latest_ev
                 self._render_inspector_event(latest_ev)
+                if self.step_nodes:
+                    latest_node = list(self.step_nodes.values())[-1]
+                    if latest_node:
+                        self.call_after_refresh(self._focus_and_scroll_node, tree, latest_node, True)
+
+            # Keep seen step count updated
+            self.session_last_seen_step_count[sid] = max(
+                self.session_last_seen_step_count.get(sid, 0),
+                session_info.get("step_count", 0) or len(all_session_events)
+            )
 
         tree.root.expand()
 
+    def _populate_artifacts_tab(self) -> None:
+        """Populates the Artifacts ListView in batch when the tab is activated."""
+        try:
+            artifacts_list = self.query_one("#artifacts-list", ListView)
+        except Exception:
+            return
+
+        all_arts = []
+        if self.current_watcher and hasattr(self.current_watcher, "get_all_artifacts"):
+            all_arts = self.current_watcher.get_all_artifacts()
+        if not all_arts:
+            all_arts = self.session_artifacts
+
+        if len(artifacts_list.children) >= len(all_arts) and len(all_arts) > 0:
+            return
+
+        artifacts_list.clear()
+        items = []
+        for art in all_arts:
+            if isinstance(art, str):
+                clean_path = art.replace("file://", "").strip()
+                exists = os.path.exists(clean_path)
+                art = {
+                    "type": "markdown" if clean_path.endswith(".md") else "file",
+                    "path": clean_path,
+                    "filename": os.path.basename(clean_path),
+                    "size_bytes": os.path.getsize(clean_path) if exists else 0,
+                    "exists": exists,
+                }
+
+            icon = "🖼️ " if art.get("type") == "image" else ("🎬 " if art.get("type") == "video" else ("🎵 " if art.get("type") == "audio" else ("📄 " if art.get("type") == "markdown" else "💻 ")))
+            size_kb = f"{art.get('size_bytes', 0) / 1024:.1f} KB" if art.get("size_bytes", 0) > 0 else "0 KB"
+            status_tag = "[green][Found][/green]" if art.get("exists") else "[red][Missing][/red]"
+
+            item_text = (
+                f"{icon}[bold white]{art.get('filename')}[/bold white] ({art.get('type')}) {status_tag} - [yellow]{size_kb}[/yellow]\n"
+                f"   [bright_black]{art.get('path')}[/bright_black]"
+            )
+            items.append(ListItem(Static(item_text), name=art.get("path")))
+
+        if items:
+            artifacts_list.extend(items)
+            if not self.selected_artifact_path and all_arts:
+                first_p = all_arts[0].get("path") if isinstance(all_arts[0], dict) else str(all_arts[0])
+                self._render_artifact_preview(first_p)
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Handles inspector tab activations, lazily populating tab content."""
+        if event.tabbed_content.id == "inspector-tabs":
+            tab_id = event.tab.id.replace("--tab-", "") if event.tab.id else ""
+            self.settings.active_tab = tab_id
+            self.settings.save()
+            if tab_id == "tab-artifacts":
+                self._populate_artifacts_tab()
+
     def _add_artifact_to_list(self, art: Any) -> None:
-        """Adds an artifact item to the interactive Artifacts ListView."""
-        if isinstance(art, str):
-            clean_path = art.replace("file://", "").strip()
-            exists = os.path.exists(clean_path)
-            art = {
-                "type": "markdown" if clean_path.endswith(".md") else "file",
-                "path": clean_path,
-                "filename": os.path.basename(clean_path),
-                "size_bytes": os.path.getsize(clean_path) if exists else 0,
-                "exists": exists,
-            }
-
-        artifacts_list = self.query_one("#artifacts-list", ListView)
-        icon = "🖼️ " if art["type"] == "image" else ("🎬 " if art["type"] == "video" else ("📄 " if art["type"] == "markdown" else "💻 "))
-        size_kb = f"{art['size_bytes'] / 1024:.1f} KB" if art["size_bytes"] > 0 else "0 KB"
-        status_tag = "[green][Found][/green]" if art["exists"] else "[red][Missing][/red]"
-
-        item_text = (
-            f"{icon}[bold white]{art['filename']}[/bold white] ({art['type']}) {status_tag} - [yellow]{size_kb}[/yellow]\n"
-            f" [bright_black]{art['path']}[/bright_black]"
-        )
-        item = ListItem(Static(item_text), name=art["path"])
-        artifacts_list.append(item)
-
-        if not self.selected_artifact_path:
-            self._render_artifact_preview(art["path"])
+        """Adds an artifact item lazily to the session artifact store."""
+        pass
 
     def _render_artifact_preview(self, file_path: str) -> None:
         """Renders the master-detail syntax-highlighted preview of the selected file."""
@@ -1211,6 +1337,22 @@ class AgyWatchApp(App):
             t.append("THINKING...", style="italic bright_black")
         else:
             t.append(f"{msg_type}", style="bright_black")
+
+        # Signal if event produced or attached artifacts/files
+        arts = ev.get("artifacts") or []
+        if arts:
+            img_count = sum(1 for a in arts if a.get("type") == "image")
+            audio_count = sum(1 for a in arts if a.get("type") == "audio")
+            doc_count = sum(1 for a in arts if a.get("type") in ("file", "markdown", "document"))
+            badges = []
+            if img_count > 0:
+                badges.append(f"🖼️ {img_count}" if img_count > 1 else "🖼️")
+            if audio_count > 0:
+                badges.append(f"🎵 {audio_count}" if audio_count > 1 else "🎵")
+            if doc_count > 0:
+                badges.append(f"📄 {doc_count}" if doc_count > 1 else "📄")
+            if badges:
+                t.append(f" [{' '.join(badges)}]", style="dim bold yellow")
 
         return t
 
@@ -1407,6 +1549,131 @@ class AgyWatchApp(App):
 
         # Event details rendering complete
 
+    def _render_root_session_overview(self, session_id: str) -> None:
+        """Renders comprehensive session overview and populates session-wide artifacts gallery."""
+        meta = self.query_one("#inspector-meta", Static)
+        p_title = self.query_one("#inspector-prompt-title", Static)
+        p_area = self.query_one("#inspector-prompt-area", TextArea)
+        t_card = self.query_one("#inspector-tool-card", Static)
+        resp_title = self.query_one("#inspector-response-title", Static)
+        resp_area = self.query_one("#inspector-response-area", TextArea)
+        th_title = self.query_one("#inspector-thinking-title", Static)
+        th_area = self.query_one("#inspector-thinking-area", TextArea)
+        json_title = self.query_one("#inspector-json-title", Static)
+        json_area = self.query_one("#inspector-json-area", TextArea)
+        art_area = self.query_one("#inspector-artifacts-area", Static)
+        tok_area = self.query_one("#inspector-tokens-area", Static)
+
+        session = self.registry.get_session(session_id, brain_root=self.brain_root) or {}
+        tag = session.get("source_tag") or ("antigravity" if session.get("session_type") == "brain" else "sdk")
+        clean_title = re.sub(r"^\[.*?\]\s*", "", session.get("title") or "Session")
+        status = session.get("status", "STATE_UNKNOWN")
+
+        # Session Meta Table
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="bold cyan", width=14)
+        t.add_column()
+        t.add_row("Session ID:", session_id)
+        t.add_row("Harness:", escape(f"[{tag}]"))
+        t.add_row("Status:", f"[bold green]{status}[/bold green]" if "DONE" in status or "RUNNING" in status else f"[bold yellow]{status}[/bold yellow]")
+        if session.get("created_at"):
+            t.add_row("Created At:", format_locale_time(session.get("created_at")))
+        if session.get("subagent_count") is not None:
+            t.add_row("Subagents:", str(session.get("subagent_count", 0)))
+        if session.get("step_count") is not None:
+            t.add_row("Total Steps:", str(session.get("step_count", 0)))
+        meta.update(t)
+
+        # Overview / Goal
+        p_title.display = True
+        p_title.update("─── ROOT SESSION TITLE & GOAL ───")
+        p_area.display = True
+        p_area.text = f"{clean_title}\n\nSession ID: {session_id}\nSource: {tag}"
+        p_area.styles.height = 6
+
+        # Hide tool card & thinking
+        t_card.display = False
+        th_title.display = False
+        th_area.display = False
+
+        # Aggregate all artifacts from session events + disk
+        events = self.session_events_store.get(session_id, [])
+        all_artifacts = []
+        seen_paths = set()
+
+        for ev in events:
+            for art in ev.get("artifacts", []):
+                p = art.get("path") if isinstance(art, dict) else art
+                if p and p not in seen_paths:
+                    seen_paths.add(p)
+                    all_artifacts.append(art)
+
+        # Also scan session brain .user_uploaded folder if available
+        from agy_watch.brain_watcher import get_all_gemini_brain_dirs
+        for b_dir in get_all_gemini_brain_dirs():
+            u_dir = os.path.join(b_dir, session_id, ".user_uploaded")
+            if os.path.isdir(u_dir):
+                for f in sorted(os.listdir(u_dir)):
+                    full_p = os.path.join(u_dir, f)
+                    if os.path.isfile(full_p) and full_p not in seen_paths:
+                        seen_paths.add(full_p)
+                        ext = os.path.splitext(f)[1].lower()
+                        kind = "image" if ext in (".png", ".jpg", ".jpeg", ".webp", ".gif") else ("audio" if ext in (".mp3", ".wav", ".ogg", ".aac", ".flac") else "file")
+                        all_artifacts.append({
+                            "type": kind,
+                            "path": full_p,
+                            "filename": f,
+                            "size_bytes": os.path.getsize(full_p),
+                            "exists": True,
+                        })
+
+        # Render artifacts list in Details tab
+        if all_artifacts:
+            art_t = Text()
+            art_t.append(f"─── SESSION ARTIFACTS & MEDIA GALLERY ({len(all_artifacts)} files) ───\n", style="bold green")
+            for art in all_artifacts:
+                if isinstance(art, str):
+                    clean_path = art.replace("file://", "").strip()
+                    exists = os.path.exists(clean_path)
+                    art = {
+                        "type": "markdown" if clean_path.endswith(".md") else "file",
+                        "path": clean_path,
+                        "filename": os.path.basename(clean_path),
+                        "size_bytes": os.path.getsize(clean_path) if exists else 0,
+                        "exists": exists,
+                    }
+                status_icon = "🖼️ " if art["type"] == "image" else ("🎬 " if art["type"] == "video" else ("🎵 " if art["type"] == "audio" else ("📄 " if art["type"] == "markdown" else "💻 ")))
+                size_kb = f"{art['size_bytes'] / 1024:.1f} KB" if art["size_bytes"] > 0 else "0 KB"
+                exists_str = "[Found on disk]" if art["exists"] else "[Missing]"
+                exists_style = "green" if art["exists"] else "red"
+                art_t.append_text(Text.from_markup(f"{status_icon}[bold white]{art['filename']}[/bold white] ({art['type']}) - [{exists_style}]{exists_str}[/{exists_style}] - {size_kb}\n"))
+                art_t.append(f"  Location: {art['path']}\n", style="bright_black")
+            art_area.display = True
+            art_area.update(art_t)
+        else:
+            art_area.display = False
+
+        # Session token summary
+        tokens = session.get("tokens") or (self.current_watcher.get_token_usage() if hasattr(self.current_watcher, "get_token_usage") else None)
+        if tokens:
+            tok_t = Text()
+            tok_t.append("─── SESSION CUMULATIVE TOKEN USAGE ───\n", style="bold cyan")
+            tok_t.append(f"{json.dumps(tokens, indent=2)}\n", style="cyan")
+            tok_area.display = True
+            tok_area.update(tok_t)
+        else:
+            tok_area.display = False
+
+        # Session JSON Metadata
+        json_title.display = True
+        json_title.update("─── SESSION METADATA (JSON) ───")
+        json_area.display = True
+        json_area.text = json.dumps(session, indent=2)
+        json_area.styles.height = 12
+
+        resp_title.display = False
+        resp_area.display = False
+
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handles list view selections from Sessions or Artifacts lists."""
         if event.list_view.id == "sessions-list":
@@ -1447,6 +1714,7 @@ class AgyWatchApp(App):
             tag = (session.get("source_tag") if session else None) or ("antigravity" if session and session.get("session_type") == "brain" else "sdk")
             clean_title = re.sub(r"^\[.*?\]\s*", "", (session.get("title") if session else "Session") or "Session")
             tree.root.set_label(f"Root Agent ({sid[:8]}) {escape(f'[{tag}]')} - {clean_title[:32]}")
+            tree.root.data = {"type": "ROOT_SESSION", "session_id": sid}
         except Exception:
             pass
         self.poll_live_updates()
@@ -1468,6 +1736,7 @@ class AgyWatchApp(App):
             tag = (session.get("source_tag") if session else None) or ("antigravity" if session and session.get("session_type") == "brain" else "sdk")
             clean_title = re.sub(r"^\[.*?\]\s*", "", (session.get("title") if session else "Session") or "Session")
             tree.root.set_label(f"Root Agent ({sid[:8]}) {escape(f'[{tag}]')} - {clean_title[:32]}")
+            tree.root.data = {"type": "ROOT_SESSION", "session_id": sid}
         except Exception:
             pass
         self.poll_live_updates()
@@ -1479,9 +1748,16 @@ class AgyWatchApp(App):
             if isinstance(event.node.data, dict) and event.node.data.get("type") == "PAGINATION_CONTROL":
                 self.action_load_earlier_steps()
                 return
-            self.selected_event = event.node.data
-            if not getattr(self, "_internal_selecting", False):
+            if isinstance(event.node.data, dict) and event.node.data.get("type") == "ROOT_SESSION":
                 self.is_following = False
+                self._render_root_session_overview(self.current_session_id)
+                return
+            self.selected_event = event.node.data
+
+            if self.step_nodes and event.node:
+                latest_node = list(self.step_nodes.values())[-1]
+                self.is_following = bool(event.node == latest_node)
+
             if self.current_session_id:
                 traj_id = str(event.node.data.get("trajectory_id") or "main")
                 step_idx = event.node.data.get("step_index")
@@ -1505,8 +1781,18 @@ class AgyWatchApp(App):
             return
         if event.node.data:
             if isinstance(event.node.data, dict) and event.node.data.get("type") == "PAGINATION_CONTROL":
+                self.is_following = False
+                return
+            if isinstance(event.node.data, dict) and event.node.data.get("type") == "ROOT_SESSION":
+                self.is_following = False
+                self._render_root_session_overview(self.current_session_id)
                 return
             self.selected_event = event.node.data
+
+            if self.step_nodes and event.node:
+                latest_node = list(self.step_nodes.values())[-1]
+                self.is_following = bool(event.node == latest_node)
+
             if self.current_session_id:
                 traj_id = str(event.node.data.get("trajectory_id") or "main")
                 step_idx = event.node.data.get("step_index")

@@ -25,6 +25,7 @@ import json
 import time
 import glob
 from typing import Any, Dict, List, Optional, Set, Tuple
+from agy_watch.telemetry_cache import SessionTelemetryCache
 
 
 def is_valid_gemini_app_dir(dir_name: str) -> bool:
@@ -84,6 +85,49 @@ def _map_transcript_status(status_str: Optional[str]) -> str:
     return "STATE_ACTIVE"
 
 
+def _decode_proto_fields(buffer: bytes) -> Dict[int, List[Any]]:
+    """Decodes raw Protobuf wire tags without external schema dependencies."""
+    from google.protobuf.internal import decoder
+    pos = 0
+    length = len(buffer)
+    fields: Dict[int, List[Any]] = {}
+    while pos < length:
+        try:
+            tag, pos = decoder._DecodeVarint32(buffer, pos)
+        except Exception:
+            break
+        field_num = tag >> 3
+        wire_type = tag & 0x07
+        if wire_type == 0:  # Varint
+            try:
+                val, pos = decoder._DecodeVarint(buffer, pos)
+            except Exception:
+                break
+        elif wire_type == 2:  # Length-delimited
+            try:
+                size, pos = decoder._DecodeVarint32(buffer, pos)
+                if pos + size > length:
+                    break
+                val = buffer[pos:pos + size]
+                pos += size
+            except Exception:
+                break
+        elif wire_type == 1:  # 64-bit
+            if pos + 8 > length:
+                break
+            val = buffer[pos:pos + 8]
+            pos += 8
+        elif wire_type == 5:  # 32-bit
+            if pos + 4 > length:
+                break
+            val = buffer[pos:pos + 4]
+            pos += 4
+        else:
+            break
+        fields.setdefault(field_num, []).append(val)
+    return fields
+
+
 class BrainTranscriptWatcher:
     """Watches an Antigravity Agent/CLI Brain session's transcript_full.jsonl incrementally."""
 
@@ -105,12 +149,19 @@ class BrainTranscriptWatcher:
         self.summary_path = os.path.join(self.session_dir, ".system_generated", "logs", "summary.json")
         self.short_title_path = os.path.join(self.session_dir, ".system_generated", "logs", "short_title.txt")
 
+        app_dir = os.path.dirname(os.path.dirname(self.session_dir))
+        self.conv_db_path = os.path.join(app_dir, "conversations", f"{self.session_id}.db")
+
         self.file_offset = 0
         self.last_mtime = 0.0
         self.all_events: List[Dict[str, Any]] = []
         self.child_watchers: Dict[str, "BrainTranscriptWatcher"] = {}
         self.known_subagent_ids: Set[str] = set()
         self.pending_tool_call: Optional[Dict[str, Any]] = None
+
+        self.max_scanned_db_idx = -1
+        self.step_token_map: Dict[int, Dict[str, int]] = {}
+        self.cache = SessionTelemetryCache(self.session_dir, self.session_id)
 
         self.session_info: Dict[str, Any] = {
             "session_id": self.session_id,
@@ -151,7 +202,7 @@ class BrainTranscriptWatcher:
         return self.session_id[:8]
 
     def _refresh_session_meta(self) -> None:
-        """Refreshes summary title, modification timestamps, and live status."""
+        """Refreshes summary title, modification timestamps, live status, and exact token metrics."""
         # 1. Update title from summary.json if available
         if os.path.exists(self.summary_path):
             try:
@@ -181,7 +232,7 @@ class BrainTranscriptWatcher:
                 now = time.time()
                 is_recent = (now - mtime) < 30.0
 
-                # If recently modified and not explicitly errored or cancelled
+                # Default liveness from mtime
                 if is_recent:
                     self.session_info["is_live"] = True
                     self.session_info["status"] = "STATE_RUNNING"
@@ -189,6 +240,67 @@ class BrainTranscriptWatcher:
                     self.session_info["is_live"] = False
                     if self.session_info["status"] in ("STATE_ACTIVE", "STATE_RUNNING"):
                         self.session_info["status"] = "STATE_DONE"
+            except Exception:
+                pass
+
+        # 3. Check sibling conversation SQLite database for authoritative lifecycle status & token metrics
+        if os.path.exists(self.conv_db_path):
+            try:
+                import sqlite3
+                conn = sqlite3.connect(f"file:{self.conv_db_path}?mode=ro", uri=True)
+                cursor = conn.cursor()
+
+                # Authoritative status check
+                last_row = cursor.execute("SELECT status, error_details FROM steps ORDER BY idx DESC LIMIT 1").fetchone()
+                if last_row:
+                    db_status = last_row[0]
+                    err_msg = last_row[1].decode("utf-8", errors="ignore") if isinstance(last_row[1], bytes) else str(last_row[1] or "")
+                    if db_status == 7 or "cancel" in err_msg.lower():
+                        self.session_info["status"] = "STATE_CANCELLED"
+                        self.session_info["is_live"] = False
+                    elif db_status == 6:
+                        self.session_info["status"] = "STATE_ERROR"
+                        self.session_info["is_live"] = False
+                    elif db_status == 2:
+                        self.session_info["status"] = "STATE_RUNNING"
+                        self.session_info["is_live"] = True
+                    elif db_status == 3:
+                        if not is_recent:
+                            self.session_info["status"] = "STATE_DONE"
+                            self.session_info["is_live"] = False
+
+                # Incremental token extraction from steps
+                new_rows = cursor.execute(
+                    "SELECT idx, step_payload FROM steps WHERE idx > ? AND status != 5 AND step_payload IS NOT NULL ORDER BY idx ASC",
+                    (self.max_scanned_db_idx,),
+                ).fetchall()
+                for idx, payload in new_rows:
+                    if idx > self.max_scanned_db_idx:
+                        self.max_scanned_db_idx = idx
+                    p = _decode_proto_fields(payload)
+                    if 5 in p:
+                        for b in p[5]:
+                            f5 = _decode_proto_fields(b)
+                            if 9 in f5:
+                                u = _decode_proto_fields(f5[9][0])
+                                pr = u.get(1, [0])[0]
+                                ca = u.get(2, [0])[0]
+                                th = u.get(3, [0])[0]
+                                cd = u.get(5, [0])[0]
+                                if pr or ca or th or cd:
+                                    self.step_token_map[idx] = {
+                                        "prompt_tokens": pr,
+                                        "candidates_tokens": ca,
+                                        "thoughts_tokens": th,
+                                        "cached_tokens": cd,
+                                        "total_tokens": pr + ca,
+                                    }
+                                    self.session_info["prompt_tokens"] += pr
+                                    self.session_info["candidates_tokens"] += ca
+                                    self.session_info["thoughts_tokens"] += th
+                                    self.session_info["cached_tokens"] += cd
+                                    self.session_info["total_tokens"] += (pr + ca)
+                conn.close()
             except Exception:
                 pass
 
@@ -200,10 +312,11 @@ class BrainTranscriptWatcher:
         sub_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Merges a PLANNER_RESPONSE tool call with its subsequent tool result into a single unified event."""
-        step_idx = result_dict.get("step_index", tool_dict.get("step_index"))
+        # Use tool call invocation step index and start timestamp
+        step_idx = tool_dict.get("step_index") if tool_dict.get("step_index") is not None else result_dict.get("step_index")
         result_type = result_dict.get("type", "TOOL_CALL")
         content = result_dict.get("content") or ""
-        created_at = result_dict.get("created_at") or tool_dict.get("created_at")
+        created_at = tool_dict.get("created_at") or result_dict.get("created_at")
         status_str = result_dict.get("status", "DONE")
 
         ts_float = time.time()
@@ -242,7 +355,7 @@ class BrainTranscriptWatcher:
             "tool_action": tool_args.get("toolAction") or tool_name,
             "tool_summary": tool_args.get("toolSummary") or (content[:60] if content else ""),
             "subagent_report": None,
-            "tokens": None,
+            "tokens": self.step_token_map.get(step_idx) or self.step_token_map.get(tool_dict.get("step_index")),
             "artifacts": [],
             "payload": result_dict,
             "child_events": [tool_dict.get("step_dict", {}), result_dict],
@@ -301,7 +414,7 @@ class BrainTranscriptWatcher:
             "tool_id": None,
             "tool_args": tool_calls[0].get("args") if tool_calls else None,
             "subagent_report": None,
-            "tokens": None,
+            "tokens": self.step_token_map.get(step_idx),
             "artifacts": [],
             "payload": d,
         }
@@ -319,8 +432,15 @@ class BrainTranscriptWatcher:
                 event["has_tool"] = True
                 event["tool_action"] = (tool_calls[0].get("args") or {}).get("toolAction") or tool_calls[0].get("name")
                 event["tool_summary"] = (tool_calls[0].get("args") or {}).get("toolSummary") or ""
+            elif content and content.strip():
+                # User-facing text response (even if model reasoning/thinking is also present)
+                event["step_type"] = "TEXT_RESPONSE"
+            elif thinking and thinking.strip():
+                # Intermediate or standalone model reasoning/thinking trace
+                event["step_type"] = "MODEL_REASONING"
             else:
-                event["step_type"] = "TEXT_RESPONSE" if not thinking else "MODEL_REASONING"
+                # Completed / terminal end-of-turn response without text body
+                event["step_type"] = "TEXT_RESPONSE"
         elif step_type_raw == "ERROR_MESSAGE":
             event["step_type"] = "ERROR_MESSAGE"
             event["state"] = "STATE_ERROR"
@@ -363,8 +483,9 @@ class BrainTranscriptWatcher:
         """Detects child subagent conversation UUIDs from invoke_subagent return payloads."""
         if not content:
             return
-        if "conversationId" in content or "Created the following subagents:" in content:
-            for sub_id in re.findall(r'conversationId[\\"]*:\s*[\\"]*([a-zA-Z0-9_\-]+)', content):
+        if "conversation" in content.lower() or "Created the following subagents:" in content:
+            found_ids = re.findall(r'(?:conversation[_-]?id|conversation\s+id)[\\"]*:\s*[\\"]*([a-zA-Z0-9_\-]+)', content, re.IGNORECASE)
+            for sub_id in found_ids:
                 if sub_id != self.session_id and sub_id not in self.known_subagent_ids:
                     self.known_subagent_ids.add(sub_id)
                     self.session_info["subagents"].add(sub_id)
@@ -386,6 +507,7 @@ class BrainTranscriptWatcher:
 
         Returns (updated_session_info, new_events_list).
         """
+        self._refresh_session_meta()
         new_events: List[Dict[str, Any]] = []
 
         if not os.path.exists(self.log_path):
@@ -484,11 +606,91 @@ class BrainTranscriptWatcher:
                 ev["id"] = len(self.all_events) + 1 + idx
             self.all_events.extend(new_events)
             self.all_events.sort(key=lambda e: (e.get("timestamp") or 0.0, e.get("step_index") or 0))
-            for idx, ev in enumerate(self.all_events):
-                ev["id"] = idx + 1
-
         self._refresh_session_meta()
+
+        # If session is cancelled or errored, ensure trailing event reflects terminal state
+        if self.session_info.get("status") == "STATE_CANCELLED" and self.all_events:
+            last_ev = self.all_events[-1]
+            last_ev["state"] = "STATE_CANCELLED"
+            last_ev["error_message"] = "Session stopped by user."
+            if new_events:
+                new_events[-1]["state"] = "STATE_CANCELLED"
+
+        # Keep telemetry cache synced in background
+        try:
+            if os.path.exists(self.log_path):
+                self.cache.sync_jsonl(
+                    self.log_path,
+                    is_main=True,
+                    step_token_map=self.step_token_map,
+                )
+        except Exception:
+            pass
+
         return self.session_info, new_events
+
+    def get_window(
+        self,
+        limit: int = 150,
+        before_step_index: Optional[int] = None,
+        after_step_index: Optional[int] = None,
+        center_on_step_index: Optional[int] = None,
+        subagent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Returns indexed event window from SQLite telemetry cache."""
+        return self.cache.get_window(
+            limit=limit,
+            before_step_index=before_step_index,
+            after_step_index=after_step_index,
+            center_on_step_index=center_on_step_index,
+            subagent_id=subagent_id,
+        )
+
+    def get_all_artifacts(self) -> List[Dict[str, Any]]:
+        """Returns all distinct artifacts extracted across events from SQLite cache."""
+        return self.cache.get_all_artifacts()
+
+    def get_total_count(self) -> int:
+        """Returns total number of events recorded in the SQLite telemetry cache."""
+        return self.cache.get_total_count()
+
+
+_conv_db_status_cache: Dict[str, Tuple[float, str, bool]] = {}
+
+
+def _get_authoritative_brain_session_status(conv_db_path: str, is_recent: bool) -> tuple[str, bool]:
+    """Inspects sibling conversations/<session_id>.db to retrieve exact lifecycle status with fast mtime caching."""
+    if not os.path.exists(conv_db_path):
+        return ("STATE_RUNNING" if is_recent else "STATE_DONE", is_recent)
+
+    try:
+        mtime = os.path.getmtime(conv_db_path)
+        if conv_db_path in _conv_db_status_cache and _conv_db_status_cache[conv_db_path][0] == mtime:
+            return (_conv_db_status_cache[conv_db_path][1], _conv_db_status_cache[conv_db_path][2])
+
+        import sqlite3
+        conn = sqlite3.connect(f"file:{conv_db_path}?mode=ro", uri=True)
+        row = conn.execute("SELECT status, error_details FROM steps ORDER BY idx DESC LIMIT 1").fetchone()
+        conn.close()
+        res = ("STATE_RUNNING" if is_recent else "STATE_DONE", is_recent)
+        if row:
+            db_status = row[0]
+            db_err = row[1].decode("utf-8", errors="ignore") if isinstance(row[1], bytes) else str(row[1] or "")
+            if db_status == 7 or "cancel" in db_err.lower():
+                res = ("STATE_CANCELLED", False)
+            elif db_status == 6:
+                res = ("STATE_ERROR", False)
+            elif db_status == 2:
+                res = ("STATE_RUNNING", True)
+            elif db_status == 3:
+                res = ("STATE_DONE", False)
+
+        _conv_db_status_cache[conv_db_path] = (mtime, res[0], res[1])
+        return res
+    except Exception:
+        pass
+
+    return ("STATE_RUNNING" if is_recent else "STATE_DONE", is_recent)
 
 
 _brain_discovery_cache: Dict[str, Tuple[float, Dict[str, Any], List[str]]] = {}
@@ -542,13 +744,16 @@ def discover_gemini_brain_sessions(gemini_root: str = "~/.gemini") -> List[Dict[
             except Exception:
                 continue
 
+            conv_db = os.path.join(app_dir, "conversations", f"{sid}.db")
+
             # Fast Cache Check: If file hasn't changed, reuse parsed metadata instantly
             if s_dir in _brain_discovery_cache and _brain_discovery_cache[s_dir][0] == mtime:
                 _, cached_s, child_subs = _brain_discovery_cache[s_dir]
                 is_live = (now - mtime) < 30.0
+                status, is_live = _get_authoritative_brain_session_status(conv_db, is_live)
                 s_copy = dict(cached_s)
                 s_copy["is_live"] = is_live
-                s_copy["status"] = "STATE_RUNNING" if is_live else "STATE_DONE"
+                s_copy["status"] = status
                 sessions[sid] = s_copy
                 for cid in child_subs:
                     child_parent_map[cid] = sid
@@ -586,12 +791,13 @@ def discover_gemini_brain_sessions(gemini_root: str = "~/.gemini") -> List[Dict[
                 pass
 
             is_live = (now - mtime) < 30.0
+            status, is_live = _get_authoritative_brain_session_status(conv_db, is_live)
             tag = normalize_source_tag(entry)
             s_dict = {
                 "session_id": sid,
                 "cascade_id": sid,
                 "title": f"[{tag}] {title}",
-                "status": "STATE_RUNNING" if is_live else "STATE_DONE",
+                "status": status,
                 "workspace_dir": s_dir,
                 "db_path": s_dir,
                 "updated_at": mtime,

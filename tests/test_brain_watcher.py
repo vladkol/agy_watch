@@ -14,6 +14,7 @@
 
 import os
 import json
+import sqlite3
 import shutil
 import tempfile
 import pytest
@@ -341,6 +342,336 @@ def test_background_command_running_status_mapping():
         from agy_watch.tool_renderers import _render_state_banner
         banner = _render_state_banner(ev)
         assert banner is None
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_sqlite_authoritative_status_and_token_extraction():
+    """Verifies that sibling SQLite conversations database provides authoritative status and exact token metrics."""
+    temp_dir = tempfile.mkdtemp(prefix="agy_test_hybrid_")
+    try:
+        session_id = "test-hybrid-session-9999"
+        app_dir = os.path.join(temp_dir, "antigravity")
+        session_dir = os.path.join(app_dir, "brain", session_id)
+        conv_dir = os.path.join(app_dir, "conversations")
+        logs_dir = os.path.join(session_dir, ".system_generated", "logs")
+
+        os.makedirs(logs_dir, exist_ok=True)
+        os.makedirs(conv_dir, exist_ok=True)
+        log_path = os.path.join(logs_dir, "transcript_full.jsonl")
+        conv_db_path = os.path.join(conv_dir, f"{session_id}.db")
+
+        # 1. Create JSONL steps
+        step0 = {
+            "step_index": 0,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "status": "DONE",
+            "content": "Perform web research",
+            "created_at": "2026-08-08T12:00:00Z",
+        }
+        step1 = {
+            "step_index": 1,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [{"name": "search_web", "args": {"query": "Antigravity"}}],
+            "created_at": "2026-08-08T12:00:05Z",
+        }
+
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(step0) + "\n")
+            f.write(json.dumps(step1) + "\n")
+
+        # 2. Create SQLite database with status=7 (cancelled) and encoded protobuf token payload
+        import sqlite3
+        conn = sqlite3.connect(conv_db_path)
+        conn.execute("CREATE TABLE steps (idx integer, step_type integer, status integer, error_details blob, step_payload blob, PRIMARY KEY(idx))")
+
+        # Encode a synthetic protobuf payload with prompt_tokens=1500, candidates_tokens=300, cached_tokens=50000
+        # Field 5 (Metadata) -> Field 9 (Usage) -> 1:1500, 2:300, 5:50000
+        from google.protobuf.internal import encoder
+        usage_buf = bytearray()
+        encoder._EncodeVarint(usage_buf.extend, (1 << 3) | 0)
+        encoder._EncodeVarint(usage_buf.extend, 1500)
+        encoder._EncodeVarint(usage_buf.extend, (2 << 3) | 0)
+        encoder._EncodeVarint(usage_buf.extend, 300)
+        encoder._EncodeVarint(usage_buf.extend, (5 << 3) | 0)
+        encoder._EncodeVarint(usage_buf.extend, 50000)
+
+        meta_buf = bytearray()
+        encoder._EncodeVarint(meta_buf.extend, (9 << 3) | 2)
+        encoder._EncodeVarint(meta_buf.extend, len(usage_buf))
+        meta_buf.extend(usage_buf)
+
+        top_buf = bytearray()
+        encoder._EncodeVarint(top_buf.extend, (5 << 3) | 2)
+        encoder._EncodeVarint(top_buf.extend, len(meta_buf))
+        top_buf.extend(meta_buf)
+
+        # Step 0
+        conn.execute("INSERT INTO steps VALUES (0, 14, 3, NULL, NULL)")
+        # Step 1 with status 7 (cancelled) and token payload
+        err_blob = b'context canceled by user'
+        conn.execute("INSERT INTO steps VALUES (1, 15, 7, ?, ?)", (err_blob, bytes(top_buf)))
+        conn.commit()
+        conn.close()
+
+        watcher = BrainTranscriptWatcher(session_dir)
+        info, events = watcher.poll()
+
+        assert info["status"] == "STATE_CANCELLED"
+        assert info["is_live"] is False
+        assert info["prompt_tokens"] == 1500
+        assert info["candidates_tokens"] == 300
+        assert info["cached_tokens"] == 50000
+        assert info["total_tokens"] == 1800
+
+        assert len(events) == 2
+        ev_tool = events[1]
+        assert ev_tool["step_type"] == "TOOL_CALL"
+        assert ev_tool["state"] == "STATE_CANCELLED"
+        assert ev_tool["tokens"] == {
+            "prompt_tokens": 1500,
+            "candidates_tokens": 300,
+            "thoughts_tokens": 0,
+            "cached_tokens": 50000,
+            "total_tokens": 1800,
+        }
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_invoke_subagent_event_ordering_and_nesting():
+    """Verifies that invoke_subagent merged tool events inherit the call timestamp and sort before subagent steps."""
+    temp_dir = tempfile.mkdtemp(prefix="agy_test_sub_order_")
+    try:
+        parent_id = "parent-session-1234"
+        subagent_id = "child-subagent-5678"
+        app_dir = os.path.join(temp_dir, "antigravity")
+        parent_dir = os.path.join(app_dir, "brain", parent_id)
+        child_dir = os.path.join(app_dir, "brain", subagent_id)
+
+        parent_logs = os.path.join(parent_dir, ".system_generated", "logs")
+        child_logs = os.path.join(child_dir, ".system_generated", "logs")
+        os.makedirs(parent_logs, exist_ok=True)
+        os.makedirs(child_logs, exist_ok=True)
+
+        # 1. Parent transcript
+        # Step 0: User prompt (12:00:00)
+        # Step 1: Tool call invoke_subagent (12:00:02)
+        # Step 2: Tool result for invoke_subagent (12:00:10)
+        p_step0 = {
+            "step_index": 0,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "status": "DONE",
+            "content": "Run worker",
+            "created_at": "2026-08-08T12:00:00Z",
+        }
+        p_step1 = {
+            "step_index": 1,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [{"name": "invoke_subagent", "args": {"Subagents": [{"TypeName": "worker", "Role": "Worker", "Prompt": "Do work"}]}}],
+            "created_at": "2026-08-08T12:00:02Z",
+        }
+        p_step2 = {
+            "step_index": 2,
+            "source": "MODEL",
+            "type": "GENERIC",
+            "status": "DONE",
+            "content": f"Subagent conversation ID: {subagent_id}",
+            "created_at": "2026-08-08T12:00:10Z",
+        }
+
+        with open(os.path.join(parent_logs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps(p_step0) + "\n")
+            f.write(json.dumps(p_step1) + "\n")
+            f.write(json.dumps(p_step2) + "\n")
+
+        # 2. Child transcript (starts at 12:00:05, between invoke call at 12:00:02 and result at 12:00:10)
+        c_step0 = {
+            "step_index": 0,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "status": "DONE",
+            "content": "Do work",
+            "created_at": "2026-08-08T12:00:05Z",
+        }
+        c_step1 = {
+            "step_index": 1,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "content": "Work done",
+            "created_at": "2026-08-08T12:00:08Z",
+        }
+
+        with open(os.path.join(child_logs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps(c_step0) + "\n")
+            f.write(json.dumps(c_step1) + "\n")
+
+        watcher = BrainTranscriptWatcher(parent_dir)
+        info, events = watcher.poll()
+
+        # Events must be in order:
+        # 1. Parent USER_INPUT (12:00:00, step 0)
+        # 2. Parent invoke_subagent TOOL_CALL (12:00:02, step 1)
+        # 3. Child USER_INPUT (12:00:05, step 0)
+        # 4. Child TEXT_RESPONSE (12:00:08, step 1)
+        assert len(events) == 4
+        assert events[0]["step_index"] == 0 and events[0]["is_main"] is True
+        assert events[1]["step_type"] == "TOOL_CALL" and events[1]["tool_name"] == "invoke_subagent"
+        assert events[1]["step_index"] == 1 and events[1]["is_main"] is True
+        assert events[1]["created_at"] == "2026-08-08T12:00:02Z"
+
+        assert events[2]["is_main"] is False and events[2]["subagent_id"] == subagent_id
+        assert events[2]["created_at"] == "2026-08-08T12:00:05Z"
+        assert events[3]["is_main"] is False and events[3]["subagent_id"] == subagent_id
+        assert events[3]["created_at"] == "2026-08-08T12:00:08Z"
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_multimodal_artifact_extraction_and_response_classification():
+    """Verifies that user-uploaded pictures/audio are extracted as artifacts and responses with thinking are classified as TEXT_RESPONSE."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        session_id = "test-multimodal-session"
+        session_dir = os.path.join(temp_dir, session_id)
+        logs_dir = os.path.join(session_dir, ".system_generated", "logs")
+        upload_dir = os.path.join(session_dir, ".user_uploaded")
+        os.makedirs(logs_dir, exist_ok=True)
+        os.makedirs(upload_dir, exist_ok=True)
+
+        # Create dummy user uploaded image and audio files on disk
+        img_path = os.path.join(upload_dir, "media_1786234356702.png")
+        with open(img_path, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\nfake_image_bytes")
+
+        audio_path = os.path.join(upload_dir, "media_1786234356703.mp3")
+        with open(audio_path, "wb") as f:
+            f.write(b"ID3\x03\x00\x00\x00\x00fake_audio_bytes")
+
+        transcript_path = os.path.join(logs_dir, "transcript_full.jsonl")
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            # 1. USER_INPUT with uploaded picture path in prompt
+            step0 = {
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "status": "DONE",
+                "content": f"<USER_REQUEST>\nCheck this diagram\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\n- {img_path}\n- {audio_path}\n</ADDITIONAL_METADATA>",
+                "created_at": "2026-08-08T12:00:00Z",
+            }
+            # 2. PLANNER_RESPONSE with both content (user-facing markdown) AND thinking
+            step1 = {
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "content": "### Diagram Analysis\nHere is the answer to your question.",
+                "thinking": "**Analyzing image**\nI see the architecture diagram.",
+                "created_at": "2026-08-08T12:00:05Z",
+            }
+            # 3. PLANNER_RESPONSE with ONLY thinking (no content)
+            step2 = {
+                "step_index": 2,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "content": "",
+                "thinking": "**Still computing**",
+                "created_at": "2026-08-08T12:00:10Z",
+            }
+            # 4. PLANNER_RESPONSE with empty content AND empty thinking (terminal stop-turn)
+            step3 = {
+                "step_index": 3,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "content": "",
+                "thinking": "",
+                "created_at": "2026-08-08T12:00:15Z",
+            }
+            f.write(json.dumps(step0) + "\n")
+            f.write(json.dumps(step1) + "\n")
+            f.write(json.dumps(step2) + "\n")
+            f.write(json.dumps(step3) + "\n")
+
+        watcher = BrainTranscriptWatcher(session_dir)
+        info, events = watcher.poll()
+
+        assert len(events) == 4
+
+        # Check step 0 (USER_INPUT with artifacts extracted)
+        ev0 = events[0]
+        assert ev0["step_type"] == "USER_INPUT"
+        assert len(ev0["artifacts"]) == 2
+        art_types = {a["type"]: a for a in ev0["artifacts"]}
+        assert "image" in art_types
+        assert art_types["image"]["filename"] == "media_1786234356702.png"
+        assert art_types["image"]["exists"] is True
+        assert "audio" in art_types
+        assert art_types["audio"]["filename"] == "media_1786234356703.mp3"
+        assert art_types["audio"]["exists"] is True
+
+        # Check step 1 (PLANNER_RESPONSE with content + thinking -> TEXT_RESPONSE)
+        ev1 = events[1]
+        assert ev1["step_type"] == "TEXT_RESPONSE"
+        assert "Diagram Analysis" in ev1["text"]
+        assert "Analyzing image" in ev1["thinking"]
+
+        # Check step 2 (PLANNER_RESPONSE with only thinking -> MODEL_REASONING)
+        ev2 = events[2]
+        assert ev2["step_type"] == "MODEL_REASONING"
+        assert "Still computing" in ev2["thinking"]
+
+        # Check step 3 (PLANNER_RESPONSE with empty content and empty thinking -> TEXT_RESPONSE)
+        ev3 = events[3]
+        assert ev3["step_type"] == "TEXT_RESPONSE"
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_discover_gemini_brain_sessions_authoritative_status():
+    """Verifies that discover_gemini_brain_sessions retrieves exact SQLite status for cancelled/interrupted sessions."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        app_dir = os.path.join(temp_dir, "antigravity")
+        brain_dir = os.path.join(app_dir, "brain")
+        conv_dir = os.path.join(app_dir, "conversations")
+        os.makedirs(brain_dir, exist_ok=True)
+        os.makedirs(conv_dir, exist_ok=True)
+
+        session_id = "interrupted-app-session-1234"
+        session_dir = os.path.join(brain_dir, session_id)
+        logs_dir = os.path.join(session_dir, ".system_generated", "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+
+        # Write dummy transcript
+        with open(os.path.join(logs_dir, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"step_index": 0, "type": "USER_INPUT", "content": "hello"}) + "\n")
+
+        # Create sibling conversations/<session_id>.db with status=7 (cancelled/interrupted)
+        conv_db_path = os.path.join(conv_dir, f"{session_id}.db")
+        conn = sqlite3.connect(conv_db_path)
+        conn.execute("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, error_details BLOB);")
+        conn.execute("INSERT INTO steps (idx, step_type, status, error_details) VALUES (0, 14, 3, NULL);")
+        conn.execute("INSERT INTO steps (idx, step_type, status, error_details) VALUES (1, 15, 7, 'context canceled by user');")
+        conn.commit()
+        conn.close()
+
+        from agy_watch.brain_watcher import discover_gemini_brain_sessions
+        sessions = discover_gemini_brain_sessions(gemini_root=temp_dir)
+
+        assert len(sessions) == 1
+        s = sessions[0]
+        assert s["session_id"] == session_id
+        assert s["status"] == "STATE_CANCELLED"
+        assert s["is_live"] is False
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 

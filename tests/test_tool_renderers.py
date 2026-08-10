@@ -668,3 +668,135 @@ def test_render_policy_event_and_tool_error():
     assert "ALLOW (Approved by Policy)" in rendered_allow
 
 
+def test_render_new_dedicated_tool_renderers():
+    """Verifies renderers for define_subagent, manage_subagents, send_message, schedule, manage_task, browser_subagent, list_permissions, list_resources."""
+    # 1. define_subagent
+    ev_define = {
+        "tool_name": "define_subagent",
+        "tool_args": {
+            "name": "doc_auditor",
+            "description": "Audits documentation and markdown syntax.",
+            "system_prompt": "You are a senior documentation auditor.",
+            "enable_write_tools": True,
+            "enable_mcp_tools": False,
+            "enable_subagent_tools": True,
+        },
+        "text": 'Subagent "doc_auditor" defined successfully.',
+        "state": "STATE_DONE",
+    }
+    rend_define = _render_to_string(render_tool_event(ev_define))
+    assert "DEFINE SUBAGENT: doc_auditor" in rend_define
+    assert "Audits documentation" in rend_define
+    assert "senior documentation auditor" in rend_define
+    assert "ENABLED" in rend_define
+    assert "DISABLED" in rend_define
+
+    # 2. manage_subagents
+    ev_manage_sub = {
+        "tool_name": "manage_subagents",
+        "tool_args": {"Action": "list"},
+        "text": '[{"role": "Code Reviewer", "type": "reviewer", "conversationId": "sub12345-6789", "state": "running", "stateDetail": "Auditing PR"}]',
+        "state": "STATE_DONE",
+    }
+    rend_manage_sub = _render_to_string(render_tool_event(ev_manage_sub))
+    assert "MANAGE SUBAGENTS" in rend_manage_sub
+    assert "Code Reviewer" in rend_manage_sub
+    assert "sub12345" in rend_manage_sub
+    assert "RUNNING" in rend_manage_sub
+    assert "Auditing PR" in rend_manage_sub
+
+    # 3. send_message
+    ev_msg = {
+        "tool_name": "send_message",
+        "tool_args": {
+            "Recipient": "agent-worker-42",
+            "Message": "# Update\nAll test suites passed successfully.",
+        },
+        "text": 'Message sent to "agent-worker-42".',
+        "state": "STATE_DONE",
+    }
+    rend_msg = _render_to_string(render_tool_event(ev_msg))
+    assert "INTER-AGENT MESSAGE" in rend_msg
+    assert "agent-worker-42" in rend_msg
+    assert "All test suites passed" in rend_msg
+    assert "DELIVERED" in rend_msg
+
+    # 4. schedule
+    ev_sched = {
+        "tool_name": "schedule",
+        "tool_args": {
+            "DurationSeconds": "30",
+            "Prompt": "Check build status of task-100",
+            "TimerCondition": "any",
+        },
+        "text": "Timer scheduled for 30s",
+        "state": "STATE_DONE",
+    }
+    rend_sched = _render_to_string(render_tool_event(ev_sched))
+    assert "TASK SCHEDULER" in rend_sched
+    assert "30 seconds" in rend_sched
+    assert "Check build status" in rend_sched
+    assert "any" in rend_sched
+
+    # 5. manage_task
+    ev_task = {
+        "tool_name": "manage_task",
+        "tool_args": {
+            "Action": "status",
+            "TaskId": "sess-1/task-500",
+        },
+        "text": "Task: sess-1/task-500 Status: RUNNING Log: file:///tmp/task.log",
+        "state": "STATE_DONE",
+    }
+    rend_task = _render_to_string(render_tool_event(ev_task))
+    assert "MANAGE TASK" in rend_task
+    assert "sess-1/task-500" in rend_task
+    assert "RUNNING" in rend_task
+
+    # 6. browser_subagent
+    ev_browser = {
+        "tool_name": "browser_subagent",
+        "tool_args": {
+            "Url": "http://localhost:8080/dashboard",
+            "Task": "Verify metrics chart renders correctly.",
+            "RecordingName": "dash_test",
+        },
+        "text": "Browser subagent findings: All metrics charts rendered without errors.",
+        "state": "STATE_DONE",
+    }
+    rend_browser = _render_to_string(render_tool_event(ev_browser))
+    assert "BROWSER SUBAGENT" in rend_browser
+    assert "http://localhost:8080/dashboard" in rend_browser
+    assert "Verify metrics chart" in rend_browser
+    assert "All metrics charts rendered" in rend_browser
+
+    # 7. list_permissions & list_resources
+    ev_perms = {
+        "tool_name": "list_permissions",
+        "text": """You have read and write access to the following workspace(s):
+- /Users/vladkol/workspace
+
+Additionally, your current permission grants are:
+- command(git): allowed
+- mcp(chrome_devtools/*): denied
+""",
+        "state": "STATE_DONE",
+    }
+    rend_perms = _render_to_string(render_tool_event(ev_perms))
+    assert "SECURITY PERMISSIONS" in rend_perms
+    assert "/Users/vladkol/workspace" in rend_perms
+    assert "command(git)" in rend_perms
+    assert "ALLOWED" in rend_perms
+    assert "DENIED" in rend_perms
+
+    ev_res = {
+        "tool_name": "list_resources",
+        "tool_args": {"ServerName": "google-developer-knowledge"},
+        "text": "Discovered 0 resources on server google-developer-knowledge.",
+        "state": "STATE_DONE",
+    }
+    rend_res = _render_to_string(render_tool_event(ev_res))
+    assert "MCP RESOURCES: google-developer-knowledge" in rend_res
+
+
+

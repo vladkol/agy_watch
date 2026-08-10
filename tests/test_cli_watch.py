@@ -286,10 +286,12 @@ async def test_tui_app_mount_and_pilot_lifecycle():
             assert json_area is not None
 
             # 3. Simulate user keyboard interactions
+            await pilot.pause()
+            init_follow = app.is_following
             await pilot.press("space")  # Toggle follow
-            assert app.is_following is False
+            assert app.is_following is not init_follow
             await pilot.press("space")  # Resume follow
-            assert app.is_following is True
+            assert app.is_following is init_follow
 
             # 4. Test tab switching (a key) on step with artifacts
             tabs = app.query_one("#inspector-tabs")

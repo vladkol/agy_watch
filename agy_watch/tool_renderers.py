@@ -229,10 +229,14 @@ def build_tool_tree_label(ev: Dict[str, Any]) -> Text:
     t = Text()
 
     # Status icon prefix
-    if has_error:
+    if has_error or state == "STATE_ERROR":
         t.append("❌ ", style="bold red")
+    elif state in ("STATE_CANCELLED", "CANCELLATION", "CANCELLATION_REQUEST"):
+        t.append("🛑 ", style="bold red")
     elif state == "STATE_WAITING_FOR_USER":
         t.append("⏳ ", style="bold yellow")
+    elif state in ("STATE_RUNNING", "STATE_ACTIVE"):
+        t.append("⏳ ", style="bold cyan")
     else:
         t.append("✓ ", style="bold green")
 
@@ -321,12 +325,54 @@ def build_tool_tree_label(ev: Dict[str, Any]) -> Text:
         tgt = tool_args.get("Target") or tool_args.get("target") or ""
         if act or tgt:
             t.append(f" ({act} {tgt[:15]})", style="italic bright_yellow")
+    elif tool_name in ("define_subagent", "defineSubagent"):
+        t.append("TOOL: define_subagent", style="bold yellow")
+        name = tool_args.get("name") or ""
+        if name:
+            t.append(f" ({name})", style="italic bright_cyan")
+    elif tool_name in ("manage_subagents", "manageSubagents"):
+        t.append("TOOL: manage_subagents", style="bold yellow")
+        act = tool_args.get("Action") or tool_args.get("action") or "list"
+        t.append(f" ({act})", style="italic bright_yellow")
+    elif tool_name in ("send_message", "sendMessage"):
+        t.append("TOOL: send_message", style="bold blue")
+        rec = tool_args.get("Recipient") or tool_args.get("recipient") or tool_args.get("RecipientName") or ""
+        if rec:
+            t.append(f" (➔ {str(rec)[:15]})", style="italic bright_blue")
+    elif tool_name in ("schedule",):
+        t.append("TOOL: schedule", style="bold cyan")
+        dur = tool_args.get("DurationSeconds") or tool_args.get("durationSeconds")
+        cron = tool_args.get("CronExpression") or tool_args.get("cronExpression")
+        if cron:
+            t.append(f" (cron: {cron})", style="italic bright_cyan")
+        elif dur:
+            t.append(f" ({dur}s)", style="italic bright_cyan")
+    elif tool_name in ("manage_task", "manageTask"):
+        t.append("TOOL: manage_task", style="bold green")
+        act = tool_args.get("Action") or tool_args.get("action") or "status"
+        tid = tool_args.get("TaskId") or tool_args.get("taskId") or ""
+        t.append(f" ({act} {str(tid).split('/')[-1]})", style="italic bright_green")
+    elif tool_name in ("browser_subagent", "browserSubagent"):
+        t.append("TOOL: browser_subagent", style="bold magenta")
+        url = tool_args.get("Url") or tool_args.get("url") or ""
+        if url:
+            t.append(f" ({url[:25]})", style="italic bright_magenta")
+    elif tool_name in ("list_permissions", "listPermissions"):
+        t.append("TOOL: list_permissions", style="bold yellow")
+    elif tool_name in ("list_resources", "listResources"):
+        t.append("TOOL: list_resources", style="bold cyan")
+        srv = tool_args.get("ServerName") or tool_args.get("serverName") or ""
+        if srv:
+            t.append(f" ({srv})", style="italic bright_cyan")
     else:
         # Custom Python Tool
         t.append(f"PYTHON: {tool_name}", style="bold cyan")
         first_arg = next((f"{k}={v}" for k, v in tool_args.items() if not str(k).startswith("_")), "")
         if first_arg:
             t.append(f" ({first_arg[:30]})", style="italic bright_yellow")
+
+    if state in ("STATE_CANCELLED", "CANCELLATION", "CANCELLATION_REQUEST"):
+        t.append(" [Cancelled]", style="bold italic red")
 
     return t
 
@@ -1391,13 +1437,330 @@ def render_tool_error(ev: Dict[str, Any], syntax_theme: str = "dracula") -> Rend
     return Panel(Group(*items), title="[bold red]TOOL EXECUTION ERROR[/bold red]", border_style="red", expand=True, padding=(0, 1))
 
 
-# Registry of dedicated tool visualizers across all 17 Antigravity tool types
+def render_define_subagent(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
+    """Renders custom subagent definition with capabilities, tool permissions, and system instructions."""
+    args, su = _extract_merged_args_and_result(ev)
+    name = args.get("name") or "subagent"
+    desc = args.get("description") or ""
+    system_prompt = args.get("system_prompt") or ""
+    enable_write = args.get("enable_write_tools", False)
+    enable_mcp = args.get("enable_mcp_tools", False)
+    enable_subagents = args.get("enable_subagent_tools", False)
+
+    items: List[RenderableType] = []
+    items.append(Text(f"🤖 SUBAGENT DEFINITION: {name}\n", style="bold bright_yellow"))
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=22)
+    grid.add_column()
+    grid.add_row("Agent Type Name:", f"[bold white]{name}[/bold white]")
+    if desc:
+        grid.add_row("Description:", f"[bright_white]{desc}[/bright_white]")
+    items.append(grid)
+
+    items.append(Text("\nTool Permissions & Capabilities:", style="bold cyan"))
+    cap_table = Table(show_header=True, header_style="bold magenta", expand=True)
+    cap_table.add_column("Capability Group", style="bright_white")
+    cap_table.add_column("Permission Status", style="bold")
+    cap_table.add_row("File Write / Run Commands", "[bold green]✅ ENABLED[/bold green]" if enable_write else "[dim]❌ DISABLED[/dim]")
+    cap_table.add_row("MCP Server Tools", "[bold green]✅ ENABLED[/bold green]" if enable_mcp else "[dim]❌ DISABLED[/dim]")
+    cap_table.add_row("Subagent Orchestration Tools", "[bold green]✅ ENABLED[/bold green]" if enable_subagents else "[dim]❌ DISABLED[/dim]")
+    items.append(cap_table)
+
+    if system_prompt:
+        items.append(Text("\nSystem Instructions / Prompt Blueprint:", style="bold cyan"))
+        items.append(Syntax(system_prompt, "markdown", theme=syntax_theme, line_numbers=False, word_wrap=True))
+
+    out_msg = su.get("output") or su.get("content") or ev.get("text") or ""
+    if out_msg:
+        items.append(Text(f"\nStatus: {out_msg}", style="bold green" if "success" in str(out_msg).lower() else "bright_white"))
+
+    return Panel(Group(*items), title=f"[bold yellow]DEFINE SUBAGENT: {name}[/bold yellow]", border_style="yellow")
+
+
+def render_manage_subagents(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
+    """Renders active subagent roster inspection and termination lifecycle controls."""
+    args, su = _extract_merged_args_and_result(ev)
+    action = args.get("Action") or args.get("action") or "list"
+    target_ids = args.get("ConversationIds") or args.get("conversationIds") or []
+    if isinstance(target_ids, str):
+        target_ids = [target_ids]
+
+    items: List[RenderableType] = []
+    items.append(Text(f"👥 SUBAGENT ORCHESTRATION MANAGEMENT\n", style="bold bright_yellow"))
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=20)
+    grid.add_column()
+    grid.add_row("Action:", f"[bold white]{str(action).upper()}[/bold white]")
+    if target_ids:
+        grid.add_row("Target Subagents:", ", ".join(f"[bold cyan]{str(tid)[:8]}[/bold cyan]" for tid in target_ids))
+    items.append(grid)
+
+    output = su.get("output") or su.get("content") or ev.get("text") or ""
+    subagents_list = []
+    if isinstance(output, str) and "[" in output and "{" in output:
+        try:
+            m = re.search(r"\[.*\]", output, re.DOTALL)
+            if m:
+                subagents_list = json.loads(m.group(0))
+        except Exception:
+            pass
+
+    if subagents_list and isinstance(subagents_list, list):
+        items.append(Text("\nActive Subagents Roster:", style="bold cyan"))
+        roster = Table(show_header=True, header_style="bold magenta", expand=True)
+        roster.add_column("Role", style="bold bright_white")
+        roster.add_column("Type", style="cyan")
+        roster.add_column("Conversation ID", style="dim")
+        roster.add_column("State", style="bold")
+        roster.add_column("State Detail", style="italic")
+
+        for s in subagents_list:
+            if isinstance(s, dict):
+                r = s.get("role") or s.get("type") or "Worker"
+                t = s.get("type") or "subagent"
+                cid = str(s.get("conversationId") or "")[:8]
+                st = str(s.get("state") or "running").upper()
+                st_color = "green" if st in ("RUNNING", "ACTIVE") else "yellow" if "WAIT" in st else "dim"
+                sd = str(s.get("stateDetail") or "")
+                roster.add_row(r, t, cid, f"[{st_color}]{st}[/{st_color}]", sd)
+        items.append(roster)
+    elif output:
+        items.append(Text("\nExecution Result:", style="bold green"))
+        items.append(Text(str(output), style="bright_white"))
+
+    return Panel(Group(*items), title="[bold yellow]MANAGE SUBAGENTS[/bold yellow]", border_style="yellow")
+
+
+def render_send_message(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
+    """Renders inter-agent message transmission with sender, recipient, and message payload."""
+    args, su = _extract_merged_args_and_result(ev)
+    recipient = args.get("Recipient") or args.get("recipient") or args.get("RecipientName") or "agent"
+    msg = args.get("Message") or args.get("message") or ""
+
+    items: List[RenderableType] = []
+    items.append(Text("💬 INTER-AGENT MESSAGE TRANSMISSION\n", style="bold bright_blue"))
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=18)
+    grid.add_column()
+    grid.add_row("Recipient:", f"[bold white]{recipient}[/bold white]")
+    grid.add_row("Direction:", "[bold magenta]AGENT ➔ SUBAGENT (PEER)[/bold magenta]")
+    grid.add_row("Status:", "[bold green]DELIVERED[/bold green]")
+    items.append(grid)
+
+    if msg:
+        items.append(Text("\nMessage Payload:", style="bold cyan"))
+        items.append(Panel(Markdown(str(msg)), border_style="bright_blue"))
+
+    out_msg = su.get("output") or su.get("content") or ev.get("text") or ""
+    if out_msg:
+        items.append(Text(f"\nDelivery Confirmation: {out_msg}", style="dim italic green"))
+
+    return Panel(Group(*items), title="[bold blue]INTER-AGENT MESSAGE[/bold blue]", border_style="blue")
+
+
+def render_schedule(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
+    """Renders timer and recurring cron schedule triggers."""
+    args, su = _extract_merged_args_and_result(ev)
+    dur = args.get("DurationSeconds") or args.get("durationSeconds")
+    cron = args.get("CronExpression") or args.get("cronExpression")
+    prompt = args.get("Prompt") or args.get("prompt") or ""
+    condition = args.get("TimerCondition") or args.get("timerCondition") or "never"
+    max_iters = args.get("MaxIterations") or args.get("maxIterations")
+
+    items: List[RenderableType] = []
+    items.append(Text("⏰ AUTONOMOUS TASK SCHEDULER\n", style="bold bright_cyan"))
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=22)
+    grid.add_column()
+
+    if cron:
+        grid.add_row("Schedule Type:", "[bold yellow]🔁 RECURRING CRON JOB[/bold yellow]")
+        grid.add_row("Cron Expression:", f"[bold white]{cron}[/bold white]")
+        if max_iters:
+            grid.add_row("Max Iterations:", f"[bold white]{max_iters}[/bold white]")
+    else:
+        grid.add_row("Schedule Type:", "[bold green]⏱️ ONE-SHOT TIMER[/bold green]")
+        grid.add_row("Duration:", f"[bold white]{dur} seconds[/bold white]" if dur else "Unspecified")
+
+    grid.add_row("Cancel Condition:", f"[bold yellow]{condition}[/bold yellow]")
+    items.append(grid)
+
+    if prompt:
+        items.append(Text("\nWakeup Prompt to Inject on Trigger:", style="bold cyan"))
+        items.append(Panel(Text(str(prompt), style="bright_white"), border_style="cyan"))
+
+    output = su.get("output") or su.get("content") or ev.get("text") or ""
+    if output:
+        items.append(Text(f"\nScheduler Status: {output}", style="dim italic green"))
+
+    return Panel(Group(*items), title="[bold cyan]TASK SCHEDULER[/bold cyan]", border_style="cyan")
+
+
+def render_manage_task(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
+    """Renders background process controller, task status inspector, and stdin feeder."""
+    args, su = _extract_merged_args_and_result(ev)
+    action = args.get("Action") or args.get("action") or "status"
+    task_id = args.get("TaskId") or args.get("taskId") or ""
+    stdin_input = args.get("Input") or args.get("input") or ""
+
+    items: List[RenderableType] = []
+    items.append(Text("⚙️ BACKGROUND TASK CONTROLLER\n", style="bold bright_green"))
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=18)
+    grid.add_column()
+    grid.add_row("Action:", f"[bold white]{str(action).upper()}[/bold white]")
+    if task_id:
+        grid.add_row("Task ID:", f"[bold yellow]{task_id}[/bold yellow]")
+    items.append(grid)
+
+    if stdin_input:
+        items.append(Text("\nSent STDIN Input:", style="bold cyan"))
+        items.append(Syntax(str(stdin_input), "text", theme=syntax_theme, line_numbers=False, word_wrap=True))
+
+    output = su.get("output") or su.get("content") or ev.get("text") or ""
+    if output:
+        items.append(Text("\nTask Status & Output Log:", style="bold green"))
+        items.append(Syntax(str(output), "text", theme=syntax_theme, line_numbers=True, word_wrap=True))
+
+    return Panel(Group(*items), title="[bold green]MANAGE TASK[/bold green]", border_style="green")
+
+
+def render_browser_subagent(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
+    """Renders browser automation subagent execution, target URL, and findings."""
+    args, su = _extract_merged_args_and_result(ev)
+    task_desc = args.get("Task") or args.get("task") or ""
+    url = args.get("Url") or args.get("url") or ""
+    recording = args.get("RecordingName") or args.get("recordingName") or ""
+
+    items: List[RenderableType] = []
+    items.append(Text("🌐 BROWSER AUTOMATION SUBAGENT\n", style="bold bright_magenta"))
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=18)
+    grid.add_column()
+    if url:
+        grid.add_row("Target URL:", f"[bold cyan]{url}[/bold cyan]")
+    if recording:
+        grid.add_row("Recording Trace:", f"[bold white]{recording}[/bold white]")
+    grid.add_row("Status:", "[bold green]COMPLETED[/bold green]")
+    items.append(grid)
+
+    if task_desc:
+        items.append(Text("\nBrowser Task Instructions:", style="bold cyan"))
+        items.append(Panel(Markdown(str(task_desc)), border_style="magenta"))
+
+    output = su.get("output") or su.get("content") or ev.get("text") or ""
+    if output:
+        items.append(Text("\nBrowser Findings & Inspection Output:", style="bold magenta"))
+        items.append(Panel(Markdown(str(output)), border_style="bright_magenta"))
+
+    return Panel(Group(*items), title="[bold magenta]BROWSER SUBAGENT[/bold magenta]", border_style="magenta")
+
+
+def render_list_permissions(ev: Dict[str, Any]) -> RenderableType:
+    """Renders active security sandbox workspaces and ordered permission grant rules."""
+    _, su = _extract_merged_args_and_result(ev)
+    output = su.get("output") or su.get("content") or ev.get("text") or ""
+
+    items: List[RenderableType] = []
+    items.append(Text("🛡️ SECURITY SANDBOX & PERMISSION MATRIX\n", style="bold bright_yellow"))
+
+    lines = str(output).splitlines()
+    workspaces: List[str] = []
+    grants: List[Tuple[str, str]] = []
+
+    in_ws = False
+    in_grants = False
+    for line in lines:
+        stripped = line.strip()
+        if "workspace(s):" in stripped.lower():
+            in_ws = True
+            in_grants = False
+            continue
+        elif "permission grants" in stripped.lower():
+            in_grants = True
+            in_ws = False
+            continue
+
+        if in_ws and stripped.startswith("-"):
+            ws_path = stripped.lstrip("- ").strip()
+            if ws_path:
+                workspaces.append(ws_path)
+        elif in_grants and stripped.startswith("-"):
+            rule = stripped.lstrip("- ").strip()
+            if ":" in rule:
+                target, status = rule.rsplit(":", 1)
+                grants.append((target.strip(), status.strip()))
+            else:
+                grants.append((rule, "allowed"))
+
+    if workspaces:
+        items.append(Text("Active Workspace Paths (Read / Write Access):", style="bold cyan"))
+        ws_table = Table(show_header=False, expand=True)
+        ws_table.add_column("Path", style="bright_white")
+        for ws in workspaces:
+            ws_table.add_row(f"📁 {ws}")
+        items.append(ws_table)
+
+    if grants:
+        items.append(Text("\nRuntime Permission Grants Matrix (Checked in Order):", style="bold cyan"))
+        grant_table = Table(show_header=True, header_style="bold magenta", expand=True)
+        grant_table.add_column("Permission Target / Scope", style="bold white")
+        grant_table.add_column("Grant Status", style="bold", width=18)
+        for target, status in grants:
+            is_allow = "allow" in status.lower()
+            badge = "[bold green]✅ ALLOWED[/bold green]" if is_allow else "[bold red]❌ DENIED[/bold red]"
+            grant_table.add_row(target, badge)
+        items.append(grant_table)
+    elif output and not workspaces:
+        items.append(Text(str(output), style="bright_white"))
+
+    return Panel(Group(*items), title="[bold yellow]SECURITY PERMISSIONS[/bold yellow]", border_style="yellow")
+
+
+def render_list_resources(ev: Dict[str, Any], syntax_theme: str = "dracula") -> RenderableType:
+    """Renders MCP server resource catalog, schemas, and URI declarations."""
+    args, su = _extract_merged_args_and_result(ev)
+    server_name = args.get("ServerName") or args.get("serverName") or args.get("server") or "MCP Server"
+    output = su.get("output") or su.get("content") or ev.get("text") or ""
+
+    items: List[RenderableType] = []
+    items.append(Text(f"🔌 MCP SERVER RESOURCE CATALOG: {server_name}\n", style="bold bright_cyan"))
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=18)
+    grid.add_column()
+    grid.add_row("MCP Server:", f"[bold white]{server_name}[/bold white]")
+    items.append(grid)
+
+    if output:
+        items.append(Text("\nDiscovered Resources:", style="bold cyan"))
+        if isinstance(output, str) and (output.strip().startswith("{") or output.strip().startswith("[")):
+            try:
+                parsed = json.loads(output)
+                items.append(Syntax(json.dumps(parsed, indent=2), "json", theme=syntax_theme, line_numbers=True, word_wrap=True))
+            except Exception:
+                items.append(Text(str(output), style="bright_white"))
+        else:
+            items.append(Text(str(output), style="bright_white"))
+
+    return Panel(Group(*items), title=f"[bold cyan]MCP RESOURCES: {server_name}[/bold cyan]", border_style="cyan")
+
+
+# Registry of dedicated tool visualizers across all Antigravity tool types
 _TOOL_DISPATCH_TABLE = {
     "run_command": render_run_command,
     "runCommand": render_run_command,
     "edit_file": render_edit_file,
     "replace_file_content": render_edit_file,
+    "multi_replace_file_content": render_edit_file,
     "editFile": render_edit_file,
+    "multiReplaceFileContent": render_edit_file,
     "create_file": render_create_file,
     "write_to_file": render_create_file,
     "createFile": render_create_file,
@@ -1416,6 +1779,21 @@ _TOOL_DISPATCH_TABLE = {
     "invoke_subagent": render_invoke_subagent,
     "start_subagent": render_invoke_subagent,
     "invokeSubagent": render_invoke_subagent,
+    "define_subagent": render_define_subagent,
+    "defineSubagent": render_define_subagent,
+    "manage_subagents": render_manage_subagents,
+    "manageSubagents": render_manage_subagents,
+    "send_message": render_send_message,
+    "sendMessage": render_send_message,
+    "schedule": render_schedule,
+    "manage_task": render_manage_task,
+    "manageTask": render_manage_task,
+    "browser_subagent": render_browser_subagent,
+    "browserSubagent": render_browser_subagent,
+    "list_permissions": render_list_permissions,
+    "listPermissions": render_list_permissions,
+    "list_resources": render_list_resources,
+    "listResources": render_list_resources,
     "ask_question": render_ask_question,
     "askQuestion": render_ask_question,
     "questionsRequest": render_ask_question,

@@ -23,9 +23,9 @@
 ┌───────────────────────────────────────┐       ┌───────────────────────────────────────┐
 │ ENGINE 1: SDK Agent Sessions ([sdk])  │       │ ENGINE 2: App Sessions ([antigravity])│
 │ - Custom Python / Multi-Lang Agents   │       │ - Native Antigravity IDE Agent & CLI  │
-│ - Loopback WebSocket Wire-Tap Hook    │       │ - Live JSONL Transcript Streaming     │
-│ - SQLite WAL Database (wire_tap.db)   │       │ - 2-Step Tool Transaction Merging     │
-│ - Content-Addressable Blob Storage    │       │ - mtime-Cached Discovery Engine       │
+│ - Loopback WebSocket Wire-Tap Hook    │       │ - Hybrid SQLite + Archival JSONL Stream│
+│ - SQLite WAL Database (wire_tap.db)   │       │ - Zero-Latency Cancellation Authority │
+│ - Content-Addressable Blob Storage    │       │ - Protobuf Varint Token Extraction    │
 └───────────────────────────────────────┘       └───────────────────────────────────────┘
 ```
 
@@ -238,47 +238,81 @@ When tools write media or markdown artifacts, files may reside in the local work
 
 ---
 
-## 6. Engine 2: Antigravity App Sessions & Brain Transcript Streaming
+## 6. Engine 2: Hybrid SQLite & Archival Transcript Streaming (App Sessions)
 
-For native **Antigravity Agent** and **Antigravity CLI** sessions, communication is not routed through local loopback WebSocket sockets. Instead, trajectories are persisted as append-only JSONL transcripts across all valid `~/.gemini/<app>/brain/` directories:
+For native **Antigravity Agent** (IDE extension), **Antigravity CLI**, and standalone app harnesses, `agy_watch` implements a **Hybrid Authority Architecture** combining live SQLite working memory with append-only archival transcript logs:
 
 ```text
-~/.gemini/<app>/brain/<session_id>/
-├── .system_generated/logs/
-│   ├── transcript.jsonl       (Token-efficient stream with truncated bulk texts)
-│   └── transcript_full.jsonl  (Complete untruncated conversation history)
-├── .system_generated/tasks/   (Background task execution logs)
-└── <artifacts>                (Generated markdown documents, reports, and code)
+~/.gemini/<app>/
+├── conversations/
+│   └── <session_id>.db        (Authoritative SQLite State: Status, Cancellation, Exact Token Counts)
+└── brain/<session_id>/
+    ├── .system_generated/logs/
+    │   ├── transcript.jsonl       (Token-efficient stream with truncated bulk texts)
+    │   └── transcript_full.jsonl  (Complete untruncated conversation history)
+    ├── .system_generated/tasks/   (Background task execution logs)
+    └── <artifacts>                (Generated markdown documents, reports, and code)
 ```
 
 ### 6.1 `mtime`-Based Machine-Wide Discovery Cache
 Scanning hundreds of workspace directories on every tick causes high CPU overhead. `_brain_discovery_cache` tracks directory `mtime` stamps, skipping unchanged sessions in $< 2.1\text{ ms}$ (a 55x performance improvement).
 
-### 6.2 2-Step Tool Transaction Merging
-Gemini Brain transcripts represent tool executions in two distinct asynchronous steps:
-1. **Step $N$ (`PLANNER_RESPONSE`)**: Model intent containing tool invocation requests (`tool_calls: [{"name": "...", "args": {...}}]`) and reasoning thoughts.
-2. **Step $N+1$ (Tool Return Output)**: Harness execution output (`LIST_DIRECTORY`, `VIEW_FILE`, `RUN_COMMAND`, `GREP_SEARCH`, `CODE_ACTION`, etc.) containing the tool's raw output.
+### 6.2 Authoritative Lifecycle & Cancellation Authority
+The sibling SQLite database (`~/.gemini/<app>/conversations/<session_id>.db`) acts as the real-time authority for session lifecycle:
+- **Instant Cancellation (`status = 7`)**: When a user clicks the Stop button, the IDE marks the active step with `status = 7` and error details `"context canceled by user"`. `agy_watch` reads this directly from SQLite with zero latency, setting `STATE_CANCELLED` and `is_live = False`.
+- **Runtime Errors (`status = 6`)**: Maps directly to `STATE_ERROR`.
+- **Active Execution (`status = 2`)**: Maps to `STATE_RUNNING` and `is_live = True`.
+- **Completion (`status = 3`)**: Maps to `STATE_DONE`.
 
-`BrainTranscriptWatcher` correlates these into a **single unified `TOOL_CALL` event**:
-- Merges tool name, arguments, execution diffs, and return values into a single DOM node.
-- Eliminates phantom `THINKING...` nodes and empty parameter blocks.
-- Emits in-flight `STATE_RUNNING` while a tool execution is underway at EOF.
+### 6.3 Pure-Python Protobuf Token Extraction
+`BrainTranscriptWatcher` unpacks internal `step_payload` blobs without external schema dependencies via `_decode_proto_fields()`:
+- Unpacks Field 5 (`StepMetadata`) $\to$ Field 9 (`UsageMetadata`).
+- Extracts exact `prompt_tokens`, `candidates_tokens`, `thoughts_tokens`, and `cached_tokens`.
+- Accumulates session totals and enriches every individual tool event with exact token usage.
+
+### 6.4 Context Window Compaction Resilience
+When conversations exceed context limits, the IDE compacts earlier turns into summary checkpoints, marking pruned steps in SQLite with `status = 5` and clearing their payloads to conserve memory. `agy_watch` resolves this by streaming full text from `transcript_full.jsonl`, ensuring **0% data loss across 10,000+ turn historical sessions**.
+
+### 6.5 Invocation-Order Subagent Hierarchy
+To prevent asynchronous subagent steps from appearing above their parent tool call:
+- Merged tool events inherit the **invocation timestamp** and **step index** from the initial tool call (`PLANNER_RESPONSE`, Step $N$) rather than the tool result completion (Step $N+1$).
+- Subagent worker branches (`🤖 Subagent (<id>)`) are nested directly underneath `▼ TOOL: invoke_subagent` in the execution tree.
+
+### 6.6 Dedicated Tool Visualizers Suite
+All App and SDK tools route through specialized Rich UI renderers:
+- **`define_subagent`**: Blueprint card with agent type name, description, capability badges (Write, MCP, Subagents), and system instructions.
+- **`manage_subagents`**: Action badge, termination summary, and active subagents roster table (Role, Type, ID, State, State Detail).
+- **`send_message`**: Inter-agent transmission header (Recipient, Sender, Direction, Delivery Status) with formatted markdown payload.
+- **`schedule`**: One-shot timer duration / recurring cron expression card with cancellation condition and prompt.
+- **`manage_task`**: Process controller card with Action (`STATUS`, `KILL`, `SEND_INPUT`, `LIST`), Task ID, live status, and stdout/stderr output.
+- **`browser_subagent`**: Browser session dashboard with Target URL, recording trace, task markdown panel, and inspection findings.
+- **`list_permissions` & `list_resources`**: Security Sandbox Matrix with allow/deny badges, active workspaces, and MCP resource catalog.
 
 ---
 
-## 7. Dynamic Lazy Pagination & Session Selection Memory
+---
 
-To render sessions with 5,000+ turns at 60 FPS without memory or DOM lag, `agy_watch` implements interactive windowed pagination:
+## 7. Unified SQLite Telemetry Cache & Smart Auto-Follow
 
-### 7.1 Sliding Window Architecture (`PAGE_SIZE = 150`)
-- **Initial Load**: Only the most recent 150 steps are inserted into the Textual DOM tree upon opening a session, rendering instantly in $< 5\text{ ms}$.
-- **Top Pagination Node**: When a session exceeds 150 steps, an interactive node appears at the top of the tree:
-  `🔼 [bold cyan]▲ Load earlier 150 steps (150/3,268 showing) - Press 'u' or Click[/bold cyan]`
-- **On-Demand Expansion**: Pressing `u` (or clicking the node) expands the window by $+150$ steps. Pressing `U` (`Shift+U`) expands to load all steps.
+To eliminate session switching latency on massive sessions (5,000+ turns) while capping RAM usage to $< 50\text{ MB}$, `agy_watch` implements a high-performance SQLite caching engine and intelligent boundary-tracking auto-scroller:
 
-### 7.2 Automatic Initial Focus & Per-Session Selection Memory
-- **First Open**: The cursor and inspector automatically focus on the **most recent event** (bottom-most node).
-- **Persistent Selection Memory**: User navigation saves `(trajectory_id, step_index, step_type)` in `session_selected_keys`. Switching across sessions (Session A $\to$ Session B $\to$ Session A) immediately restores the exact event previously selected in Session A.
+### 7.1 SQLite Telemetry Cache (`SessionTelemetryCache`)
+- **Persistent Local Cache (`telemetry_cache.db`)**: Placed in the session's workspace under `agy_watch/telemetry_cache.db`.
+- **Incremental Byte-Offset Sync**: Stores `last_byte_offset` in a `meta` table. On subsequent polls, `sync_jsonl()` seeks directly to the last offset, processing only newly appended lines in $O(1)$ time ($< 3\text{ ms}$).
+- **Tail-First Windowed Queries**: Uses `SELECT * FROM events ORDER BY step_index DESC LIMIT 150` with composite index `idx_events_step (step_index, subagent_id)` to fetch viewport events directly from disk without keeping all historical steps in Python memory.
+
+### 7.2 Sliding Window Positioning & Selection Restoration
+When switching between sessions, `agy_watch` evaluates a 3-way lifecycle decision:
+1. **Live Session OR New Background Events**: If the session is currently active or received new steps since the user last visited (`current_step_count > last_seen_step_count`), it loads the latest tail window, selects the newest step, scrolls to the absolute bottom via `tree.scroll_end()`, and enables auto-follow.
+2. **Unchanged Historical Session with Saved Selection**: If the user previously inspected Step $K$ in a completed session with no new events, `get_window(center_on_step_index=K)` queries a window centered around Step $K$ ($K - 75$ through $K + 75$), restores selection on Step $K$, and keeps auto-follow disabled.
+3. **First-Time Open**: Queries the tail window, focuses the most recent event, and enables auto-follow if live.
+
+### 7.3 Smart Auto-Follow & Viewport Auto-Scroll
+- **Live Stream Auto-Scroll**: When new events arrive while `is_following` is active, the TUI dispatches `self.call_after_refresh(tree.scroll_end, animate=False)` to guarantee Textual scrolls the viewport to the absolute bottom after DOM layout calculation.
+- **Dynamic Boundary Detection**:
+  - Scrolling upward or selecting any historical step automatically pauses auto-follow (`is_following = False`), protecting user inspection.
+  - Scrolling all the way back down to the most recent event (`latest_node`) automatically re-engages live auto-follow (`is_following = True`).
+- **Interactive Top Pagination**: When viewing a window with earlier steps, an interactive node `🔼 [bold cyan]▲ Load earlier 150 steps[/bold cyan]` allows expanding backward on demand (`u` or click).
 
 ---
 
@@ -286,6 +320,9 @@ To render sessions with 5,000+ turns at 60 FPS without memory or DOM lag, `agy_w
 
 | Protocol Scenario | Root Cause on Wire | How `agy_watch` Handles It |
 | :--- | :--- | :--- |
+| **Session Cancellation (`context canceled by user`)** | User stops session; JSONL stops writing without explicit cancel line. | Queries sibling SQLite `steps` table for authoritative `status = 7`, marking session and in-flight tool step as `STATE_CANCELLED`. |
+| **Context Window Compaction** | Long sessions prune SQLite `step_payload` blobs (`status = 5`). | Streams full text from `transcript_full.jsonl` while maintaining real-time token metrics and lifecycle from SQLite. |
+| **Subagent Invocation Hierarchy Inversion** | Subagents start while parent `invoke_subagent` tool result is still pending. | Stamps merged tool event with call start timestamp and step index so `TOOL: invoke_subagent` renders as parent before subagents. |
 | **Missing `trajectoryId` on Hook Frames** | Protobuf `callHookRequest` lacks top-level trajectory ID. | Correlates `requestId` with the active subagent turn and links matching target arguments back to the subagent branch. |
 | **Action Key Divergence** | SDK calls `create_file`, but harness emits `editFile`. | Normalizes file mutation tool families to correctly match pre-tool approvals with tool execution. |
 | **Two-Step Tool Asynchrony (Brain)** | Brain transcripts split model intent and tool stdout into separate steps. | Merges `PLANNER_RESPONSE` and subsequent tool outputs into unified `TOOL_CALL` nodes with in-flight `STATE_RUNNING`. |
