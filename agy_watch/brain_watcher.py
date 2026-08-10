@@ -184,6 +184,17 @@ class BrainTranscriptWatcher:
             "session_type": "brain",
         }
 
+        # Proactively warm telemetry cache on initialization if transcript exists
+        if os.path.exists(self.log_path):
+            try:
+                self.cache.sync_jsonl(
+                    self.log_path,
+                    is_main=True,
+                    step_token_map=self.step_token_map,
+                )
+            except Exception:
+                pass
+
     def _read_initial_title(self) -> str:
         """Extracts initial title from summary.json or short_title.txt if present."""
         if os.path.exists(self.summary_path):
@@ -638,13 +649,30 @@ class BrainTranscriptWatcher:
         subagent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Returns indexed event window from SQLite telemetry cache."""
-        return self.cache.get_window(
+        res = self.cache.get_window(
             limit=limit,
             before_step_index=before_step_index,
             after_step_index=after_step_index,
             center_on_step_index=center_on_step_index,
             subagent_id=subagent_id,
         )
+        if res.get("total_count", 0) == 0 and os.path.exists(self.log_path):
+            try:
+                self.cache.sync_jsonl(
+                    self.log_path,
+                    is_main=True,
+                    step_token_map=self.step_token_map,
+                )
+                res = self.cache.get_window(
+                    limit=limit,
+                    before_step_index=before_step_index,
+                    after_step_index=after_step_index,
+                    center_on_step_index=center_on_step_index,
+                    subagent_id=subagent_id,
+                )
+            except Exception:
+                pass
+        return res
 
     def get_all_artifacts(self) -> List[Dict[str, Any]]:
         """Returns all distinct artifacts extracted across events from SQLite cache."""

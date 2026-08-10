@@ -1086,7 +1086,13 @@ class AgyWatchApp(App):
                 total_valid = win["total_count"]
                 earlier_count = max(0, total_valid - len(display_events))
             else:
-                # Fallback for SDK sessions
+                display_events = []
+                has_earlier = False
+                total_valid = 0
+                earlier_count = 0
+
+            # Fallback for SDK sessions or when SQLite cache is not yet populated
+            if not display_events and all_session_events:
                 valid_events = []
                 for ev in all_session_events:
                     if self.subagent_filter and ev.get("subagent_id") != self.subagent_filter and ev.get("trajectory_id") != self.subagent_filter:
