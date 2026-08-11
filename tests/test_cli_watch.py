@@ -293,13 +293,19 @@ async def test_tui_app_mount_and_pilot_lifecycle():
             await pilot.press("space")  # Resume follow
             assert app.is_following is init_follow
 
-            # 4. Test tab switching (a key) on step with artifacts
+            # 4. Test tab switching (a key) across all 3 tabs (Details -> Artifacts -> Config -> Details)
             tabs = app.query_one("#inspector-tabs")
             assert tabs.active == "tab-details"
             await pilot.press("a")      # Switch to Artifacts tab
             assert tabs.active == "tab-artifacts"
             artifacts_list = app.query_one("#artifacts-list")
             assert len(artifacts_list.children) > 0
+
+            await pilot.press("a")      # Switch to Agent Config tab
+            assert tabs.active == "tab-config"
+            config_content = app.query_one("#config-content")
+            assert config_content is not None
+
             await pilot.press("a")      # Switch back to Details tab
             assert tabs.active == "tab-details"
 
@@ -460,9 +466,11 @@ async def test_tui_app_settings_restoration():
             tabs = app.query_one("#inspector-tabs", TabbedContent)
             assert tabs.active == "tab-details"
 
-            # Pressing 'a' toggles between tab-details and tab-artifacts
+            # Pressing 'a' toggles between tab-details, tab-artifacts, and tab-config
             await pilot.press("a")
             assert tabs.active == "tab-artifacts"
+            await pilot.press("a")
+            assert tabs.active == "tab-config"
             await pilot.press("a")
             assert tabs.active == "tab-details"
 

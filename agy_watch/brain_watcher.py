@@ -157,10 +157,12 @@ class BrainTranscriptWatcher:
         self.all_events: List[Dict[str, Any]] = []
         self.child_watchers: Dict[str, "BrainTranscriptWatcher"] = {}
         self.known_subagent_ids: Set[str] = set()
+        self.subagent_spawn_step_map: Dict[str, int] = {}
         self.pending_tool_call: Optional[Dict[str, Any]] = None
 
         self.max_scanned_db_idx = -1
         self.step_token_map: Dict[int, Dict[str, int]] = {}
+        self.step_attachments_map: Dict[int, List[str]] = {}
         self.cache = SessionTelemetryCache(self.session_dir, self.session_id)
 
         self.session_info: Dict[str, Any] = {
@@ -184,6 +186,9 @@ class BrainTranscriptWatcher:
             "session_type": "brain",
         }
 
+        # Proactively refresh token metrics and user attachments from conv_db
+        self._refresh_session_meta()
+
         # Proactively warm telemetry cache on initialization if transcript exists
         if os.path.exists(self.log_path):
             try:
@@ -191,7 +196,30 @@ class BrainTranscriptWatcher:
                     self.log_path,
                     is_main=True,
                     step_token_map=self.step_token_map,
+                    step_attachments_map=self.step_attachments_map,
                 )
+                # Discover existing child subagents on startup
+                with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        try:
+                            d = json.loads(line)
+                            c = d.get("content") or ""
+                            p_idx = d.get("step_index")
+                            self._discover_child_subagents(c, parent_step_idx=p_idx)
+                        except Exception:
+                            pass
+                # Sync discovered child subagents to cache
+                for sub_id, child_w in self.child_watchers.items():
+                    if os.path.exists(child_w.log_path):
+                        self.cache.sync_jsonl(
+                            child_w.log_path,
+                            is_main=False,
+                            subagent_id=sub_id,
+                            step_token_map=child_w.step_token_map,
+                            step_attachments_map=child_w.step_attachments_map,
+                        )
             except Exception:
                 pass
 
@@ -311,6 +339,17 @@ class BrainTranscriptWatcher:
                                     self.session_info["thoughts_tokens"] += th
                                     self.session_info["cached_tokens"] += cd
                                     self.session_info["total_tokens"] += (pr + ca)
+                    if 19 in p:
+                        for p19 in p[19]:
+                            if isinstance(p19, bytes):
+                                inner = _decode_proto_fields(p19)
+                                if 9 in inner:
+                                    for p9 in inner[9]:
+                                        if isinstance(p9, bytes):
+                                            for match in re.finditer(rb'(/Users/[^\s\x00-\x1f\x7f-\xff]+\.(?:png|jpg|jpeg|webp|gif|svg|mp4|pdf))', p9):
+                                                path_str = match.group(1).decode("utf-8", errors="ignore")
+                                                if os.path.exists(path_str):
+                                                    self.step_attachments_map.setdefault(idx, []).append(path_str)
                 conn.close()
             except Exception:
                 pass
@@ -371,6 +410,8 @@ class BrainTranscriptWatcher:
             "payload": result_dict,
             "child_events": [tool_dict.get("step_dict", {}), result_dict],
         }
+        if step_idx is not None and step_idx in self.step_attachments_map:
+            event["attachments"] = list(self.step_attachments_map[step_idx])
 
         # Resolve structured artifacts
         try:
@@ -429,6 +470,8 @@ class BrainTranscriptWatcher:
             "artifacts": [],
             "payload": d,
         }
+        if step_idx is not None and step_idx in self.step_attachments_map:
+            event["attachments"] = list(self.step_attachments_map[step_idx])
 
         # Map step_type to agy_watch standard types
         if step_type_raw == "USER_INPUT":
@@ -490,13 +533,15 @@ class BrainTranscriptWatcher:
 
         return event
 
-    def _discover_child_subagents(self, content: str) -> None:
+    def _discover_child_subagents(self, content: str, parent_step_idx: Optional[int] = None) -> None:
         """Detects child subagent conversation UUIDs from invoke_subagent return payloads."""
         if not content:
             return
         if "conversation" in content.lower() or "Created the following subagents:" in content:
             found_ids = re.findall(r'(?:conversation[_-]?id|conversation\s+id)[\\"]*:\s*[\\"]*([a-zA-Z0-9_\-]+)', content, re.IGNORECASE)
             for sub_id in found_ids:
+                if parent_step_idx is not None:
+                    self.subagent_spawn_step_map[sub_id] = parent_step_idx
                 if sub_id != self.session_id and sub_id not in self.known_subagent_ids:
                     self.known_subagent_ids.add(sub_id)
                     self.session_info["subagents"].add(sub_id)
@@ -546,7 +591,8 @@ class BrainTranscriptWatcher:
 
                             # Check for subagents in content
                             c = d.get("content") or ""
-                            self._discover_child_subagents(c)
+                            p_idx = self.pending_tool_call.get("step_index") if self.pending_tool_call else step_idx
+                            self._discover_child_subagents(c, parent_step_idx=p_idx)
 
                             # 1. Check for PLANNER_RESPONSE with tool calls
                             if stype == "PLANNER_RESPONSE" and tool_calls:
@@ -605,18 +651,31 @@ class BrainTranscriptWatcher:
         # Poll child subagent watchers
         for sub_id, child_w in list(self.child_watchers.items()):
             child_info, child_new = child_w.poll()
+            spawn_step = self.subagent_spawn_step_map.get(sub_id)
             for cev in child_new:
                 cev["is_main"] = False
                 cev["subagent_id"] = sub_id
+                if spawn_step is not None:
+                    cev["spawn_step_index"] = spawn_step
                 new_events.append(cev)
 
-        # Sort all new events chronologically by timestamp
+        def _get_sort_key(e: Dict[str, Any]) -> Tuple[int, int, float, int]:
+            is_main = e.get("is_main", True)
+            st_idx = e.get("step_index") or 0
+            ts = e.get("timestamp") or 0.0
+            if is_main:
+                return (st_idx, 0, ts, st_idx)
+            else:
+                spawn = e.get("spawn_step_index") or 0
+                return (spawn, 1, ts, st_idx)
+
+        # Sort all new events chronologically by hierarchy and step index
         if new_events:
-            new_events.sort(key=lambda e: (e.get("timestamp") or 0.0, e.get("step_index") or 0))
+            new_events.sort(key=_get_sort_key)
             for idx, ev in enumerate(new_events):
                 ev["id"] = len(self.all_events) + 1 + idx
             self.all_events.extend(new_events)
-            self.all_events.sort(key=lambda e: (e.get("timestamp") or 0.0, e.get("step_index") or 0))
+            self.all_events.sort(key=_get_sort_key)
         self._refresh_session_meta()
 
         # If session is cancelled or errored, ensure trailing event reflects terminal state
@@ -634,7 +693,17 @@ class BrainTranscriptWatcher:
                     self.log_path,
                     is_main=True,
                     step_token_map=self.step_token_map,
+                    step_attachments_map=self.step_attachments_map,
                 )
+            for sub_id, child_w in self.child_watchers.items():
+                if os.path.exists(child_w.log_path):
+                    self.cache.sync_jsonl(
+                        child_w.log_path,
+                        is_main=False,
+                        subagent_id=sub_id,
+                        step_token_map=child_w.step_token_map,
+                        step_attachments_map=child_w.step_attachments_map,
+                    )
         except Exception:
             pass
 
@@ -663,6 +732,14 @@ class BrainTranscriptWatcher:
                     is_main=True,
                     step_token_map=self.step_token_map,
                 )
+                for sub_id, child_w in self.child_watchers.items():
+                    if os.path.exists(child_w.log_path):
+                        self.cache.sync_jsonl(
+                            child_w.log_path,
+                            is_main=False,
+                            subagent_id=sub_id,
+                            step_token_map=child_w.step_token_map,
+                        )
                 res = self.cache.get_window(
                     limit=limit,
                     before_step_index=before_step_index,
@@ -677,6 +754,25 @@ class BrainTranscriptWatcher:
     def get_all_artifacts(self) -> List[Dict[str, Any]]:
         """Returns all distinct artifacts extracted across events from SQLite cache."""
         return self.cache.get_all_artifacts()
+
+    def get_agent_config(self) -> Dict[str, Any]:
+        """Returns structured agent configuration metadata with fast mtime caching."""
+        if not hasattr(self, "_cached_agent_config") or self._cached_agent_config is None:
+            self._cached_agent_config = None
+            self._cached_config_mtime = 0.0
+
+        current_mtime = os.path.getmtime(self.log_path) if os.path.exists(self.log_path) else 0.0
+        if self._cached_agent_config is not None and self._cached_config_mtime == current_mtime:
+            return self._cached_agent_config
+
+        from agy_watch.agent_config import extract_brain_agent_config
+        self._cached_agent_config = extract_brain_agent_config(
+            session_dir=self.session_dir,
+            transcript_path=self.log_path,
+            conv_db_path=self.conv_db_path,
+        )
+        self._cached_config_mtime = current_mtime
+        return self._cached_agent_config
 
     def get_total_count(self) -> int:
         """Returns total number of events recorded in the SQLite telemetry cache."""

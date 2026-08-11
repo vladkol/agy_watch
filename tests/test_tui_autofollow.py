@@ -175,3 +175,33 @@ async def test_tui_session_switching_new_events_jump_to_tail_and_historical_rest
             assert app.selected_event["step_index"] == 49
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_tui_tree_viewport_scrolling_on_stream():
+    """Verifies that tree.scroll_y moves when new steps exceed the viewport height."""
+    temp_dir = tempfile.mkdtemp(prefix="test_tui_scroll_")
+    try:
+        session_id = "test-live-scrolling-session"
+        app_dir = os.path.join(temp_dir, "antigravity")
+        session_dir = os.path.join(app_dir, "brain", session_id)
+        logs_dir = os.path.join(session_dir, ".system_generated", "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        log_path = os.path.join(logs_dir, "transcript_full.jsonl")
+
+        with open(log_path, "w", encoding="utf-8") as f:
+            for i in range(30):
+                f.write(json.dumps({"step_index": i, "type": "PLANNER_RESPONSE", "content": f"Step {i}"}) + "\n")
+
+        app = AgyWatchApp(brain_root=temp_dir)
+        async with app.run_test(size=(80, 10)) as pilot:
+            app.attach_to_session(session_id)
+            await pilot.pause(0.3)
+
+            tree = app.query_one("#steps-tree", Tree)
+            assert tree.cursor_line is not None
+            assert tree.cursor_line >= 25
+            assert tree.scroll_y > 0
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+

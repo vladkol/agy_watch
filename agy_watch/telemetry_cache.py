@@ -65,6 +65,7 @@ class SessionTelemetryCache:
 
     def _init_db(self) -> None:
         """Initializes SQLite schema with WAL mode and indexes."""
+        SCHEMA_VERSION = "v2_attachments"
         with self._get_connection() as conn:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
@@ -75,6 +76,12 @@ class SessionTelemetryCache:
                     value TEXT
                 );
             """)
+
+            row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+            if row is None or row[0] != SCHEMA_VERSION:
+                conn.execute("DROP TABLE IF EXISTS events;")
+                conn.execute("DELETE FROM meta;")
+                conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (SCHEMA_VERSION,))
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS events (
@@ -134,6 +141,7 @@ class SessionTelemetryCache:
         is_main: bool = True,
         subagent_id: Optional[str] = None,
         step_token_map: Optional[Dict[int, int]] = None,
+        step_attachments_map: Optional[Dict[int, List[str]]] = None,
     ) -> int:
         """Incrementally reads new JSONL lines and inserts normalized events into SQLite."""
         if not os.path.exists(log_path):
@@ -148,6 +156,7 @@ class SessionTelemetryCache:
             return 0
 
         step_token_map = step_token_map or {}
+        step_attachments_map = step_attachments_map or {}
         new_events: List[Dict[str, Any]] = []
         pending_tool_call: Optional[Dict[str, Any]] = None
 
@@ -179,6 +188,7 @@ class SessionTelemetryCache:
                                 is_main=is_main,
                                 sub_id=subagent_id,
                                 step_token_map=step_token_map,
+                                step_attachments_map=step_attachments_map,
                             )
                             new_events.append(prev_ev)
 
@@ -203,6 +213,7 @@ class SessionTelemetryCache:
                             is_main=is_main,
                             sub_id=subagent_id,
                             step_token_map=step_token_map,
+                            step_attachments_map=step_attachments_map,
                         )
                         pending_tool_call = None
                         new_events.append(event)
@@ -215,15 +226,18 @@ class SessionTelemetryCache:
                             is_main=is_main,
                             sub_id=subagent_id,
                             step_token_map=step_token_map,
+                            step_attachments_map=step_attachments_map,
                         )
                         new_events.append(prev_ev)
                         pending_tool_call = None
 
+                    # 4. Standard step normalization
                     event = self._normalize_step(
                         d,
                         is_main=is_main,
                         sub_id=subagent_id,
                         step_token_map=step_token_map,
+                        step_attachments_map=step_attachments_map,
                     )
                     new_events.append(event)
                 except Exception:
@@ -284,7 +298,7 @@ class SessionTelemetryCache:
                         json.dumps(ev.get("tool_args") or {}),
                         ev.get("tool_action", ""),
                         ev.get("tool_summary", ""),
-                        ev.get("tokens", 0) or 0,
+                        ev["tokens"].get("total_tokens", 0) if isinstance(ev.get("tokens"), dict) else (int(ev["tokens"]) if isinstance(ev.get("tokens"), (int, float)) else 0),
                         1 if ev.get("artifacts") else 0,
                         json.dumps(ev.get("artifacts") or []),
                         json.dumps(ev.get("payload") or {}),
@@ -300,13 +314,14 @@ class SessionTelemetryCache:
         is_main: bool = True,
         sub_id: Optional[str] = None,
         step_token_map: Optional[Dict[int, int]] = None,
+        step_attachments_map: Optional[Dict[int, List[str]]] = None,
     ) -> Dict[str, Any]:
-        """Merges a PLANNER_RESPONSE tool call with its subsequent tool result into a unified event."""
+        """Merges a PLANNER_RESPONSE tool call with its subsequent tool result into a single unified event."""
         step_idx = tool_dict.get("step_index") if tool_dict.get("step_index") is not None else result_dict.get("step_index")
         result_type = result_dict.get("type", "TOOL_CALL")
         content = result_dict.get("content") or ""
         created_at = tool_dict.get("created_at") or result_dict.get("created_at")
-        status_str = result_dict.get("status", "DONE")
+        status_str = result_dict.get("status")
 
         ts_float = time.time()
         if created_at:
@@ -320,6 +335,7 @@ class SessionTelemetryCache:
         tool_name = tool_dict.get("tool_name") or result_type.lower()
         tool_args = tool_dict.get("tool_args") or {}
         step_token_map = step_token_map or {}
+        step_attachments_map = step_attachments_map or {}
 
         event: Dict[str, Any] = {
             "seq_num": step_idx,
@@ -348,6 +364,8 @@ class SessionTelemetryCache:
             "artifacts": [],
             "payload": result_dict,
         }
+        if step_idx is not None and step_idx in step_attachments_map:
+            event["attachments"] = list(step_attachments_map[step_idx])
 
         try:
             from agy_watch.wire_tap import extract_event_artifacts
@@ -367,6 +385,7 @@ class SessionTelemetryCache:
         is_main: bool = True,
         sub_id: Optional[str] = None,
         step_token_map: Optional[Dict[int, int]] = None,
+        step_attachments_map: Optional[Dict[int, List[str]]] = None,
     ) -> Dict[str, Any]:
         """Normalizes a raw transcript step into a standard agy_watch event."""
         step_idx = d.get("step_index")
@@ -387,6 +406,7 @@ class SessionTelemetryCache:
                 pass
 
         step_token_map = step_token_map or {}
+        step_attachments_map = step_attachments_map or {}
 
         event: Dict[str, Any] = {
             "seq_num": step_idx,
@@ -411,6 +431,8 @@ class SessionTelemetryCache:
             "artifacts": [],
             "payload": d,
         }
+        if step_idx is not None and step_idx in step_attachments_map:
+            event["attachments"] = list(step_attachments_map[step_idx])
 
         if step_type_raw == "USER_INPUT":
             event["step_type"] = "USER_INPUT"

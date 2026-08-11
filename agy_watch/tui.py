@@ -626,6 +626,16 @@ class AgyWatchApp(App):
         padding: 0 1;
         margin-bottom: 1;
     }
+
+    #config-scroll {
+        height: 1fr;
+        padding: 0 1;
+    }
+
+    #config-content {
+        height: auto;
+        padding: 0;
+    }
     """
 
     BINDINGS = [
@@ -688,11 +698,14 @@ class AgyWatchApp(App):
         # Step deduplication and hierarchy tracking
         self.step_nodes: Dict[Tuple[str, Any, str], TreeNode] = {}
         self.subagent_branches: Dict[str, TreeNode] = {}
+        self.invoke_nodes_by_step: Dict[int, TreeNode] = {}
         self.latest_invoke_node: Optional[TreeNode] = None
 
         # Artifacts tracking
         self.session_artifacts: List[Dict[str, Any]] = []
         self.seen_artifact_paths: Set[str] = set()
+        self.subagent_roles: Dict[str, str] = {}
+        self.subagent_spawn_map: Dict[str, int] = {}
 
     def compose(self) -> ComposeResult:
         from agy_watch.formatters import get_header_time_format
@@ -736,6 +749,9 @@ class AgyWatchApp(App):
                                 yield Static(" [dim]No file selected for preview[/dim]", id="artifacts-preview-header")
                                 with VerticalScroll(id="artifacts-preview-scroll"):
                                     yield Static("Select a file above to preview with syntax highlighting.\nPress 'f' or Enter for fullscreen.", id="artifacts-preview-content")
+                    with TabPane("Agent Config", id="tab-config"):
+                        with VerticalScroll(id="config-scroll"):
+                            yield Static("Loading agent configuration...", id="config-content")
 
         yield Footer()
 
@@ -752,9 +768,13 @@ class AgyWatchApp(App):
             except Exception:
                 pass
 
-        if self.settings.active_tab in ("tab-details", "tab-artifacts"):
+        if self.settings.active_tab in ("tab-details", "tab-artifacts", "tab-config"):
             try:
                 self.query_one("#inspector-tabs", TabbedContent).active = self.settings.active_tab
+                if self.settings.active_tab == "tab-artifacts":
+                    self._populate_artifacts_tab()
+                elif self.settings.active_tab == "tab-config":
+                    self._populate_config_tab()
             except Exception:
                 pass
 
@@ -885,8 +905,20 @@ class AgyWatchApp(App):
         else:
             self.current_watcher = SessionWatcher(session["db_path"])
 
+        self.subagent_roles.clear()
+        self.subagent_spawn_map.clear()
+        if hasattr(self.current_watcher, "get_agent_config"):
+            try:
+                cfg = self.current_watcher.get_agent_config()
+                self.subagent_roles = cfg.get("subagent_role_map", {})
+            except Exception:
+                self.subagent_roles = {}
+        if hasattr(self.current_watcher, "subagent_spawn_step_map"):
+            self.subagent_spawn_map.update(self.current_watcher.subagent_spawn_step_map)
+
         self.step_nodes.clear()
         self.subagent_branches.clear()
+        self.invoke_nodes_by_step.clear()
         self.latest_invoke_node = None
         self.session_artifacts.clear()
         self.seen_artifact_paths.clear()
@@ -922,24 +954,19 @@ class AgyWatchApp(App):
 
     def _focus_and_scroll_node(self, tree: Tree, node: TreeNode, align_to_bottom: bool = True) -> None:
         """Safely moves cursor and scrolls to a node after Textual computes layout line coordinates."""
-        if not node:
-            return
-        self._internal_populating = True
         try:
-            tree.move_cursor(node)
+            tree.cursor_line = node.line
             tree.scroll_to_node(node, animate=False)
             if align_to_bottom:
                 tree.scroll_end(animate=False)
         except Exception:
             pass
-        finally:
-            self._internal_populating = False
 
     def _add_event_node_to_tree(self, tree: Tree, ev: Dict[str, Any]) -> Optional[TreeNode]:
         """Adds or updates a single event node in the tree."""
         label = self._build_event_tree_label(ev)
         is_main = ev.get("is_main", True)
-        traj_id = str(ev.get("trajectory_id") or "main")
+        traj_id = str(ev.get("subagent_id") or ev.get("trajectory_id") or "main")
         step_idx = ev.get("step_index")
         step_type = ev.get("step_type")
         sub_id = ev.get("subagent_id") or ev.get("trajectory_id")
@@ -979,10 +1006,11 @@ class AgyWatchApp(App):
                     if step_type == "TOOL_CALL" and ev.get("tool_name") == "invoke_subagent":
                         sub_count = len(ev.get("tool_args", {}).get("Subagents", []))
                         count_label = f" ({sub_count} workers)" if sub_count > 0 else ""
-                        invoke_node = tree.root.add(f"▼ [bold yellow]TOOL: invoke_subagent[/bold yellow]{count_label}", data=ev, expand=True)
-                        self.latest_invoke_node = invoke_node
+                        invoke_node = tree.root.add(f"[bold yellow]TOOL: invoke_subagent[/bold yellow]{count_label}", data=ev, expand=True)
                         if step_idx is not None:
+                            self.invoke_nodes_by_step[step_idx] = invoke_node
                             self.step_nodes[step_key] = invoke_node
+                        self.latest_invoke_node = invoke_node
                         node = invoke_node
                     else:
                         if children:
@@ -994,8 +1022,20 @@ class AgyWatchApp(App):
                             self.step_nodes[step_key] = node
                 else:
                     if sub_id not in self.subagent_branches:
-                        parent_container = self.latest_invoke_node if self.latest_invoke_node else tree.root
-                        sub_branch = parent_container.add(f"🤖 [bold cyan]Subagent ({str(sub_id)[:8]})[/bold cyan] [Active]", expand=True)
+                        spawn_step = ev.get("spawn_step_index")
+                        if spawn_step is None and sub_id:
+                            spawn_step = self.subagent_spawn_map.get(sub_id) or getattr(self.current_watcher, "subagent_spawn_step_map", {}).get(sub_id)
+                        if spawn_step is not None and spawn_step in self.invoke_nodes_by_step:
+                            parent_container = self.invoke_nodes_by_step[spawn_step]
+                        else:
+                            parent_container = self.latest_invoke_node if self.latest_invoke_node else tree.root
+                        sub_role = self.subagent_roles.get(sub_id, "")
+                        role_str = f" [{sub_role}]" if sub_role else ""
+                        sub_branch = parent_container.add(
+                            f"🤖 [bold cyan]Subagent{role_str} ({str(sub_id)[:8]})[/bold cyan] [Active]",
+                            data={"type": "SUBAGENT_BRANCH", "subagent_id": sub_id, "role": sub_role},
+                            expand=True,
+                        )
                         self.subagent_branches[sub_id] = sub_branch
 
                     sub_branch = self.subagent_branches[sub_id]
@@ -1007,10 +1047,12 @@ class AgyWatchApp(App):
                     tool_n = ev.get("tool_name") or ""
                     st_type = ev.get("step_type") or ""
                     is_term = ev.get("is_terminal") or ev.get("subagent_report") is not None
+                    sub_role = self.subagent_roles.get(sub_id, "")
+                    role_str = f" [{sub_role}]" if sub_role else ""
                     if is_term or st_type == "SUBAGENT_REPORT" or tool_n in ("finish", "complete_task"):
-                        sub_branch.set_label(f"🤖 [bold cyan]Subagent ({str(sub_id)[:8]})[/bold cyan] [DONE]")
+                        sub_branch.set_label(f"🤖 [bold cyan]Subagent{role_str} ({str(sub_id)[:8]})[/bold cyan] [DONE]")
                     elif ev.get("state") == "STATE_ERROR":
-                        sub_branch.set_label(f"🤖 [bold cyan]Subagent ({str(sub_id)[:8]})[/bold cyan] [ERROR]")
+                        sub_branch.set_label(f"🤖 [bold cyan]Subagent{role_str} ({str(sub_id)[:8]})[/bold cyan] [ERROR]")
 
         return node
 
@@ -1137,6 +1179,21 @@ class AgyWatchApp(App):
                     else:
                         self.pagination_top_node = None
 
+                    # Sort display_events hierarchically so parent invoke_subagent always precedes its child subagents
+                    spawn_map = getattr(self.current_watcher, "subagent_spawn_step_map", {}) or self.subagent_spawn_map
+                    def _get_sort_key(ev: Dict[str, Any]) -> Tuple[int, int, float, int]:
+                        is_main = ev.get("is_main", True)
+                        st_idx = ev.get("step_index") or 0
+                        ts = ev.get("timestamp") or 0.0
+                        sub_id = ev.get("subagent_id")
+                        if is_main:
+                            return (st_idx, 0, ts, st_idx)
+                        else:
+                            spawn = spawn_map.get(sub_id, ev.get("spawn_step_index", 0))
+                            return (spawn, 1, ts, st_idx)
+
+                    display_events = sorted(display_events, key=_get_sort_key)
+
                     for ev in display_events:
                         self._add_event_node_to_tree(tree, ev)
 
@@ -1214,24 +1271,43 @@ class AgyWatchApp(App):
             pass
 
     def _populate_artifacts_tab(self) -> None:
-        """Populates the Artifacts ListView in batch when the tab is activated."""
+        """Populates the Artifacts ListView scoped to the currently selected tree node."""
         try:
             artifacts_list = self.query_one("#artifacts-list", ListView)
         except Exception:
             return
 
-        all_arts = []
-        if self.current_watcher and hasattr(self.current_watcher, "get_all_artifacts"):
-            all_arts = self.current_watcher.get_all_artifacts()
-        if not all_arts:
-            all_arts = self.session_artifacts
-
-        if len(artifacts_list.children) >= len(all_arts) and len(all_arts) > 0:
-            return
-
         artifacts_list.clear()
-        items = []
-        for art in all_arts:
+
+        sel = self.selected_event
+        is_root = bool(not sel or (isinstance(sel, dict) and sel.get("type") == "ROOT_SESSION"))
+        is_subagent_branch = bool(isinstance(sel, dict) and sel.get("type") == "SUBAGENT_BRANCH")
+
+        target_arts: List[Dict[str, Any]] = []
+
+        if is_root:
+            if self.current_watcher and hasattr(self.current_watcher, "get_all_artifacts"):
+                target_arts = self.current_watcher.get_all_artifacts()
+            if not target_arts:
+                target_arts = self.session_artifacts
+        elif is_subagent_branch:
+            sub_id = sel.get("subagent_id")
+            all_evs = self.session_events_store.get(self.current_session_id, [])
+            seen_p: Set[str] = set()
+            for ev in all_evs:
+                if ev.get("subagent_id") == sub_id:
+                    for a in ev.get("artifacts", []):
+                        p = a.get("path") if isinstance(a, dict) else str(a)
+                        if p not in seen_p:
+                            seen_p.add(p)
+                            target_arts.append(a)
+        elif isinstance(sel, dict):
+            target_arts = sel.get("artifacts") or []
+
+        # Deduplicate paths
+        deduped_arts: List[Dict[str, Any]] = []
+        seen_paths: Set[str] = set()
+        for art in target_arts:
             if isinstance(art, str):
                 clean_path = art.replace("file://", "").strip()
                 exists = os.path.exists(clean_path)
@@ -1242,7 +1318,28 @@ class AgyWatchApp(App):
                     "size_bytes": os.path.getsize(clean_path) if exists else 0,
                     "exists": exists,
                 }
+            p = art.get("path")
+            if p and p not in seen_paths:
+                seen_paths.add(p)
+                deduped_arts.append(art)
 
+        if not deduped_arts:
+            scope_desc = "Root Agent" if not is_root else "session"
+            msg = (
+                "[dim italic]No files or attachments linked to this event.\n"
+                f"(Select '{scope_desc}' in the tree to view all session files)[/dim italic]"
+            )
+            artifacts_list.append(ListItem(Static(msg), disabled=True))
+            try:
+                self.query_one("#artifacts-preview-header", Static).update(" [dim]No file selected for preview[/dim]")
+                self.query_one("#artifacts-preview-content", Static).update("Select a file above to preview.\nPress 'f' or Enter for fullscreen.")
+            except Exception:
+                pass
+            self.selected_artifact_path = None
+            return
+
+        items = []
+        for art in deduped_arts:
             icon = "🖼️ " if art.get("type") == "image" else ("🎬 " if art.get("type") == "video" else ("🎵 " if art.get("type") == "audio" else ("📄 " if art.get("type") == "markdown" else "💻 ")))
             size_kb = f"{art.get('size_bytes', 0) / 1024:.1f} KB" if art.get("size_bytes", 0) > 0 else "0 KB"
             status_tag = "[green][Found][/green]" if art.get("exists") else "[red][Missing][/red]"
@@ -1253,11 +1350,13 @@ class AgyWatchApp(App):
             )
             items.append(ListItem(Static(item_text), name=art.get("path")))
 
-        if items:
-            artifacts_list.extend(items)
-            if not self.selected_artifact_path and all_arts:
-                first_p = all_arts[0].get("path") if isinstance(all_arts[0], dict) else str(all_arts[0])
-                self._render_artifact_preview(first_p)
+        artifacts_list.extend(items)
+        try:
+            self.query_one("#artifacts-preview-header", Static).update(" [dim]No file selected for preview[/dim]")
+            self.query_one("#artifacts-preview-content", Static).update("Select a file above to preview.\nPress 'f' or Enter for fullscreen.")
+        except Exception:
+            pass
+        self.selected_artifact_path = None
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Handles inspector tab activations, lazily populating tab content."""
@@ -1270,6 +1369,27 @@ class AgyWatchApp(App):
                 self.settings.save()
             if pane_id == "tab-artifacts" or event.tabbed_content.active == "tab-artifacts":
                 self._populate_artifacts_tab()
+            elif pane_id == "tab-config" or event.tabbed_content.active == "tab-config":
+                self._populate_config_tab()
+
+    def _populate_config_tab(self) -> None:
+        """Renders the Agent Configuration panels in the Agent Config tab."""
+        try:
+            content_widget = self.query_one("#config-content", Static)
+        except Exception:
+            return
+
+        config: Dict[str, Any] = {}
+        if self.current_watcher and hasattr(self.current_watcher, "get_agent_config"):
+            try:
+                config = self.current_watcher.get_agent_config()
+            except Exception:
+                config = {}
+
+        from agy_watch.agent_config import render_agent_config_panels
+        panels = render_agent_config_panels(config, width=80)
+        from rich.console import Group
+        content_widget.update(Group(*panels))
 
     def _add_artifact_to_list(self, art: Any) -> None:
         """Adds an artifact item lazily to the session artifact store."""
@@ -1472,6 +1592,42 @@ class AgyWatchApp(App):
             th_area.display = False
             json_title.display = False
             json_area.display = False
+            art_area.display = False
+            tok_area.display = False
+            return
+
+        if ev.get("type") == "SUBAGENT_BRANCH":
+            sub_id = ev.get("subagent_id", "")
+            sub_role = ev.get("role", "")
+            all_evs = [e for e in self.session_events_store.get(self.current_session_id, []) if e.get("subagent_id") == sub_id]
+            step_count = len(all_evs)
+            arts_count = sum(len(e.get("artifacts", [])) for e in all_evs)
+            meta_lines = [
+                f"Actor:          🤖 Subagent [{sub_role}]",
+                f"Subagent ID:    {sub_id}",
+                f"Total Steps:    {step_count}",
+                f"Total Files:    {arts_count}",
+            ]
+            meta.text = "\n".join(meta_lines)
+            meta.language = "yaml"
+            p_title.display = False
+            p_area.display = False
+            t_header.display = False
+            t_body.display = False
+            resp_title.display = False
+            resp_area.display = False
+            th_title.display = False
+            th_area.display = False
+            json_title.display = True
+            json_title.update(" SUBAGENT BRANCH SUMMARY (JSON) ")
+            json_area.display = True
+            json_area.text = json.dumps({
+                "subagent_id": sub_id,
+                "role": sub_role,
+                "step_count": step_count,
+                "artifacts_count": arts_count,
+            }, indent=2)
+            json_area.language = "json"
             art_area.display = False
             tok_area.display = False
             return
@@ -1793,6 +1949,12 @@ class AgyWatchApp(App):
                         wrap_mode=self.settings.wrap_text,
                     ))
 
+    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        """Updates file preview pane as user navigates items in Artifacts list."""
+        if event.list_view.id == "artifacts-list":
+            if event.item and event.item.name:
+                self._render_artifact_preview(event.item.name)
+
     def action_load_earlier_steps(self) -> None:
         """Expands the visible historical step window by 150 steps."""
         if not self.current_session_id:
@@ -1839,14 +2001,24 @@ class AgyWatchApp(App):
         self.notify("Loaded all steps in session.")
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
-        """Handles tree node selection to inspect step payload and switch to Event Details tab."""
+        """Handles tree node selection to inspect step payload and update active inspector tab."""
         if event.node.data:
             if isinstance(event.node.data, dict) and event.node.data.get("type") == "PAGINATION_CONTROL":
                 self.action_load_earlier_steps()
                 return
             if isinstance(event.node.data, dict) and event.node.data.get("type") == "ROOT_SESSION":
                 self.is_following = False
-                self._render_root_session_overview(self.current_session_id)
+                self.selected_event = event.node.data
+                try:
+                    tabs = self.query_one("#inspector-tabs", TabbedContent)
+                    if tabs.active == "tab-artifacts":
+                        self._populate_artifacts_tab()
+                    elif tabs.active == "tab-config":
+                        self._populate_config_tab()
+                    else:
+                        self._render_root_session_overview(self.current_session_id)
+                except Exception:
+                    self._render_root_session_overview(self.current_session_id)
                 return
             self.selected_event = event.node.data
 
@@ -1861,18 +2033,19 @@ class AgyWatchApp(App):
                 self.session_selected_keys[self.current_session_id] = (traj_id, step_idx, step_type)
 
             if not self.is_modal_active:
-                self._render_inspector_event(event.node.data)
                 try:
                     tabs = self.query_one("#inspector-tabs", TabbedContent)
-                    if tabs.active != "tab-details":
-                        tabs.active = "tab-details"
-                        self.settings.active_tab = "tab-details"
-                        self.settings.save()
+                    if tabs.active == "tab-artifacts":
+                        self._populate_artifacts_tab()
+                    elif tabs.active == "tab-config":
+                        self._populate_config_tab()
+                    else:
+                        self._render_inspector_event(event.node.data)
                 except Exception:
-                    pass
+                    self._render_inspector_event(event.node.data)
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
-        """Updates inspector and switches to Event Details tab as cursor navigates tree nodes."""
+        """Updates inspector as cursor navigates tree nodes."""
         if getattr(self, "_internal_populating", False):
             return
         if event.node.data:
@@ -1881,7 +2054,17 @@ class AgyWatchApp(App):
                 return
             if isinstance(event.node.data, dict) and event.node.data.get("type") == "ROOT_SESSION":
                 self.is_following = False
-                self._render_root_session_overview(self.current_session_id)
+                self.selected_event = event.node.data
+                try:
+                    tabs = self.query_one("#inspector-tabs", TabbedContent)
+                    if tabs.active == "tab-artifacts":
+                        self._populate_artifacts_tab()
+                    elif tabs.active == "tab-config":
+                        self._populate_config_tab()
+                    else:
+                        self._render_root_session_overview(self.current_session_id)
+                except Exception:
+                    self._render_root_session_overview(self.current_session_id)
                 return
             self.selected_event = event.node.data
 
@@ -1896,15 +2079,16 @@ class AgyWatchApp(App):
                 self.session_selected_keys[self.current_session_id] = (traj_id, step_idx, step_type)
 
             if not self.is_modal_active:
-                self._render_inspector_event(event.node.data)
                 try:
                     tabs = self.query_one("#inspector-tabs", TabbedContent)
-                    if tabs.active != "tab-details":
-                        tabs.active = "tab-details"
-                        self.settings.active_tab = "tab-details"
-                        self.settings.save()
+                    if tabs.active == "tab-artifacts":
+                        self._populate_artifacts_tab()
+                    elif tabs.active == "tab-config":
+                        self._populate_config_tab()
+                    else:
+                        self._render_inspector_event(event.node.data)
                 except Exception:
-                    pass
+                    self._render_inspector_event(event.node.data)
 
     def action_toggle_follow(self) -> None:
         if self.is_modal_active:
@@ -1934,7 +2118,7 @@ class AgyWatchApp(App):
             self.poll_live_updates()
 
     def action_toggle_inspector_tab(self) -> None:
-        """Toggles active inspector tab between Event Details and Artifacts & Files."""
+        """Toggles active inspector tab between Event Details, Artifacts & Files, and Agent Config."""
         if self.is_modal_active:
             return
         try:
@@ -1944,6 +2128,11 @@ class AgyWatchApp(App):
                 self.settings.active_tab = "tab-artifacts"
                 self._populate_artifacts_tab()
                 self.notify("Switched to Artifacts & Files tab.")
+            elif tabs.active == "tab-artifacts":
+                tabs.active = "tab-config"
+                self.settings.active_tab = "tab-config"
+                self._populate_config_tab()
+                self.notify("Switched to Agent Config tab.")
             else:
                 tabs.active = "tab-details"
                 self.settings.active_tab = "tab-details"

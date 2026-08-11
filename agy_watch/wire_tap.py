@@ -621,6 +621,13 @@ def extract_event_artifacts(
             "exists": exists,
         })
 
+    # 0. Check explicit event attachments (e.g. user prompt uploads from conversation database)
+    for att in ev.get("attachments") or []:
+        if isinstance(att, str):
+            add_file_if_valid(att, require_exists=True)
+        elif isinstance(att, dict) and att.get("path"):
+            add_file_if_valid(att["path"], att.get("type", "file"), require_exists=True)
+
     # 1. Check tool arguments for generateImage / generate_image
     tool_args = ev.get("tool_args") or {}
     tool_name = ev.get("tool_name") or ""
@@ -681,22 +688,31 @@ def extract_event_artifacts(
         str(ev.get("thinking") or ""),
         str(ev.get("payload") or ""),
     ]
-    img_pattern = re.compile(r"!\[.*?\]\((file:///)?([^)]+)\)")
+    # Sanitize content strings: strip IDE open document lists from <ADDITIONAL_METADATA>
+    sanitized_content_strings = []
     for c in content_strings:
+        if not c:
+            continue
+        cleaned = re.sub(r"Other open documents:.*?(?=</ADDITIONAL_METADATA>|\Z)", "", c, flags=re.DOTALL)
+        cleaned = re.sub(r"Active Document:.*?(?=\n|\Z)", "", cleaned)
+        sanitized_content_strings.append(cleaned)
+
+    img_pattern = re.compile(r"!\[.*?\]\((file:///)?([^)]+)\)")
+    for c in sanitized_content_strings:
         for match in img_pattern.finditer(c):
             matched_path = match.group(2)
             add_file_if_valid(matched_path, "image", require_exists=True)
 
     # 4. Check for file:/// markdown links
     file_pattern = re.compile(r"file://(/[^\s\)\`\"']+)")
-    for c in content_strings:
+    for c in sanitized_content_strings:
         for match in file_pattern.finditer(c):
             matched_path = match.group(1)
             add_file_if_valid(matched_path, require_exists=True)
 
     # 5. Check for raw file paths (including user uploads and media files)
     raw_path_pattern = re.compile(r"(/[^\s\)\`\"'<>]+?\.(?:png|jpg|jpeg|webp|gif|svg|mp3|wav|ogg|mp4|webm|pdf|md))\b", re.IGNORECASE)
-    for c in content_strings:
+    for c in sanitized_content_strings:
         for match in raw_path_pattern.finditer(c):
             matched_path = match.group(1)
             add_file_if_valid(matched_path, require_exists=True)

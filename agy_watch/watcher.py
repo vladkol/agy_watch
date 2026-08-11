@@ -793,3 +793,26 @@ class SessionWatcher:
             workspace_dir=self.workspace_dir,
             session_id=self.session_info.get("session_id"),
         )
+
+    def get_agent_config(self) -> Dict[str, Any]:
+        """Returns structured agent configuration metadata with fast caching."""
+        if hasattr(self, "_cached_agent_config") and self._cached_agent_config is not None:
+            return self._cached_agent_config
+        from agy_watch.agent_config import extract_sdk_agent_config
+        if not os.path.exists(self.db_path):
+            self._cached_agent_config = extract_sdk_agent_config({})
+            return self._cached_agent_config
+        try:
+            conn = self._get_connection()
+            row = conn.execute(
+                "SELECT payload_json FROM wire_events WHERE message_type LIKE '%Initialize%' OR payload_json LIKE '%harnessConfig%' OR payload_json LIKE '%models%' ORDER BY seq_num ASC LIMIT 1"
+            ).fetchone()
+            conn.close()
+            if row and row[0]:
+                data = json.loads(row[0])
+                self._cached_agent_config = extract_sdk_agent_config(data)
+                return self._cached_agent_config
+        except Exception:
+            pass
+        self._cached_agent_config = extract_sdk_agent_config({})
+        return self._cached_agent_config
